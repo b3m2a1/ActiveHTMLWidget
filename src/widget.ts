@@ -84,6 +84,7 @@ export class ActiveHTMLModel extends DOMWidgetModel {
             innerHTML: "",
             textContent: "",
             _bodyType: "",
+            _debugPrint:false,
             styleDict: {},
             elementAttributes: {},
             id: "",
@@ -148,7 +149,9 @@ export class ActiveHTMLView extends DOMWidgetView {
             this._currentStyles.clear();
             this.el.removeAttribute('style');
         } else {
-            // console.log(elementStyles);
+            if (this.model.get("_debugPrint")) {
+                console.log(this.el, "Element Styles:", elementStyles);
+            }
             for (let prop in elementStyles) {
                 if (elementStyles.hasOwnProperty(prop)) {
                     // console.log(">", prop, elementStyles[prop]);
@@ -159,7 +162,6 @@ export class ActiveHTMLView extends DOMWidgetView {
         }
     }
     updateStyles(model: any, value: any, options: any) {
-        // console.log(options);
         this.setStyles();
         this.removeStyles();
     }
@@ -223,19 +225,24 @@ export class ActiveHTMLView extends DOMWidgetView {
 
     updateBody(): void {
         let children = this.model.get('children');
+        let debug = this.model.get("_debugPrint");
         if (children.length > 0) {
+            if (debug) { console.log(this.el, "Updating Children..."); }
             this.update_children();
             // console.log('for the future...');
             // this.updateChildren();
         } else {
             let html = this.model.get("innerHTML");
             if (html.length > 0) {
+                if (debug) { console.log(this.el, "Updating HTML..."); }
                 this.updateInnerHTML();
             } else {
                 let text = this.model.get("textContent");
                 if (text.length > 0) {
+                    if (debug) { console.log(this.el, "Updating Text..."); }
                     this.updateTextContent();
                 } else {
+                    if (debug) { console.log(this.el, "Updating HTML..."); }
                     this.updateInnerHTML();
                 }
             }
@@ -289,8 +296,10 @@ export class ActiveHTMLView extends DOMWidgetView {
     }
     updateAttributes() {
         let attrs = this.model.get('elementAttributes');
+        let debug = this.model.get("_debugPrint");
         for (let prop in attrs) {
             let val = attrs[prop];
+            if (debug) { console.log(this.el, "Adding Property:", prop); }
             if (val === "") {
                 this.el.removeAttribute(prop);
             } else {
@@ -314,21 +323,23 @@ export class ActiveHTMLView extends DOMWidgetView {
     _currentEvents: Record<string, any>;
     setEvents() {
         let listeners = this.model.get('eventPropertiesDict') as Record<string, string[]>;
+        let debug = this.model.get("_debugPrint");
         for (let key in listeners) {
             if (listeners.hasOwnProperty(key)) {
+                if (debug) { console.log(this.el, "Adding Event:", key); }
                 this._currentEvents[key] = this.constructEventListener(key, listeners[key]);
                 this.el.addEventListener(key, this._currentEvents[key]);
             }
         }
-        // console.log(events);
     }
     removeEvents(): void {
         let newListeners = this.model.get('eventPropertiesDict') as Record<string, string[]>;
         let current = this._currentEvents;
+        let debug = this.model.get("_debugPrint");
         for (let prop in current) {
             if (current.hasOwnProperty(prop)) {
                 if (!newListeners.hasOwnProperty(prop)) {
-                    // console.log("?..", prop);
+                    if (debug) { console.log(this.el, "Removing Event:", prop); }
                     this.el.removeEventListener(prop, this._currentEvents[prop]);
                     this._currentEvents.delete(prop);
                 }
@@ -420,6 +431,10 @@ export class ActiveHTMLView extends DOMWidgetView {
     constructEventListener(eventName:string, props:string[]) {
         let parent = this;
         return function (e:Event) {
+            let debug = parent.model.get('_debugPrint');
+            if (debug) {
+                console.log(parent.el, "Handling event:", eventName)
+            }
             // console.log("|", eventName, props);
             parent.sendEventMessage(e, parent.constructEventMessage(e, props, eventName));
         };
@@ -456,7 +471,10 @@ export class ActiveHTMLView extends DOMWidgetView {
         if (message === undefined) {
             message = this.constructEventMessage(e);
         }
-        // console.log(message);
+        let debug = this.model.get('_debugPrint');
+        if (debug) {
+            console.log(this.el, "Sending message:", message)
+        }
         this.send(message);
     }
 

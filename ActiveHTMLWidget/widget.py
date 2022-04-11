@@ -34,6 +34,7 @@ class HTMLElement(DOMWidget):
         "button", "buttons",
         "alKey", "shiftKey", "ctrlKey", "metaKey"
     ]).tag(sync=True)
+    _debugPrint = Bool(False).tag(sync=True)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
