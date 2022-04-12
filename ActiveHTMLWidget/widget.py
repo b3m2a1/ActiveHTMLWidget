@@ -1,6 +1,7 @@
 
-from ipywidgets import DOMWidget, register, widget_serialization, CallbackDispatcher
-from traitlets import Unicode, List, Dict, Bool
+from ipywidgets import Widget, DOMWidget, register, widget_serialization, CallbackDispatcher
+from traitlets import Unicode, Bool, Instance, Dict, List
+from ipywidgets.widgets.trait_types import TypedTuple
 from ._frontend import module_name, module_version
 
 @register
@@ -22,7 +23,7 @@ class HTMLElement(DOMWidget):
     elementAttributes = Dict().tag(sync=True)
     innerHTML = Unicode('').tag(sync=True)
     textContent = Unicode('').tag(sync=True)
-    children = List().tag(sync=True, **widget_serialization)
+    children = TypedTuple(trait=Instance(Widget)).tag(sync=True, **widget_serialization)
     id = Unicode('').tag(sync=True)
     value = Unicode('').tag(sync=True)
     trackInput = Bool(False).tag(sync=True)
@@ -57,4 +58,26 @@ class HTMLElement(DOMWidget):
         """Remove any previously defined callback."""
         self._callbacks.callbacks.clear()
 
+    _here = __file__
+    @classmethod
+    def jupyterlab_install(self, overwrite=False):
+        """
+        Attempts to do a basic installation for JupterLab
+        :return:
+        :rtype:
+        """
+        import sys, shutil, os
 
+        prefix = sys.exec_prefix
+        pkg_root = os.path.dirname(os.path.abspath(self._here))
+        pkg_name = os.path.basename(pkg_root)
+        src = os.path.join(pkg_root, 'labextension')
+        target = os.path.join(prefix, "share", "jupyter", "labextensions", pkg_name)
+        copied = False
+        if overwrite or not os.path.isdir(target):
+            copied = True
+            shutil.copytree(src, target)
+
+        from IPython.core.display import HTML
+        if copied:
+            return HTML("<h4>Extension installed. You will need to reload the page to get the widgets to display.</h1>")
