@@ -27,6 +27,7 @@ class HTMLElement(DOMWidget):
     id = Unicode('').tag(sync=True)
     value = Unicode('').tag(sync=True)
     trackInput = Bool(False).tag(sync=True)
+    continuousUpdate = Bool(True).tag(sync=True)
     eventPropertiesDict = Dict().tag(sync=True)
     defaultEventProperties = List(default_value=[
         "bubbles", "cancelable", "composed",

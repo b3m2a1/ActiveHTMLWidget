@@ -175,10 +175,6 @@ export class ActiveHTMLView extends DOMWidgetView {
                     this._currentStyles.add(prop);
                 }
             }
-
-            if (this.model.get("_debugPrint")) {
-                console.log(this.el, "final styles:", this.el.style);
-            }
         }
     }
     updateStyles() {
@@ -188,13 +184,11 @@ export class ActiveHTMLView extends DOMWidgetView {
 
     // Manage classes
     updateClassList(): void {
-        // @ts-ignore
         if (this.model.get("_debugPrint")) {
             console.log(this.el, "Element Classes:", this.model.get("classList"));
         }
-        for (let cls in this.el.classList) {
-            this.el.classList.remove(cls);
-        }
+        //@ts-ignore
+        this.el.classList.remove(...this.el.classList);
         for (let cls of this.model.get("classList")) {
             this.el.classList.add(cls);
         }
