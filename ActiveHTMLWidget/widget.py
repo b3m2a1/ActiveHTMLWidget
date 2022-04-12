@@ -58,6 +58,16 @@ class HTMLElement(DOMWidget):
         """Remove any previously defined callback."""
         self._callbacks.callbacks.clear()
 
+    def __repr__(self):
+        body = self.children if len(self.children) > 0 else self.innerHTML if len(self.innerHTML) > 0 else self.textContent
+        return "{}({}, {!r}, cls={}, style={})".format(
+            type(self).__name__,
+            'div' if self.tagName == "" else self.tagName,
+            body,
+            self.classList,
+            self.styleDict
+        )
+
     _here = __file__
     @classmethod
     def jupyterlab_install(self, overwrite=False):
@@ -66,7 +76,7 @@ class HTMLElement(DOMWidget):
         :return:
         :rtype:
         """
-        import sys, shutil, os
+        import sys, shutil, os, tempfile as tf
 
         prefix = sys.exec_prefix
         pkg_root = os.path.dirname(os.path.abspath(self._here))
@@ -76,7 +86,20 @@ class HTMLElement(DOMWidget):
         copied = False
         if overwrite or not os.path.isdir(target):
             copied = True
-            shutil.copytree(src, target)
+            if os.path.exists(target):
+                with tf.TemporaryDirectory() as new_loc:
+                    try:
+                        os.remove(new_loc)
+                    except:
+                        pass
+                os.rename(target, new_loc)
+            else:
+                new_loc = None
+            try:
+                shutil.copytree(src, target)
+            except:
+                if new_loc is not None:
+                   os.rename(new_loc, target)
 
         from IPython.core.display import HTML
         if copied:

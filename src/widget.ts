@@ -13,9 +13,7 @@ import {
 
 import {MODULE_NAME, MODULE_VERSION} from './version';
 
-import {
-    Widget, PanelLayout
-} from '@lumino/widgets';
+import {Widget, PanelLayout} from '@lumino/widgets';
 import {ArrayExt} from '@lumino/algorithm';
 import {
     Message, MessageLoop
@@ -38,7 +36,7 @@ class LayoutManagerWidget extends Widget {
         options.tag = view.tagName;
         super(options);
         this._view = view;
-        this.layout = new PanelLayout();
+        this.layout = new PanelLayout({fitPolicy:'set-no-constraint'});
     }
     dispose() {
         if (this.isDisposed) {
@@ -158,6 +156,8 @@ export class ActiveHTMLView extends DOMWidgetView {
             }
         }
     }
+    setLayout(layout: WidgetModel, oldLayout?: WidgetModel) {} // null override
+    setStyle(style: WidgetModel, oldStyle?: WidgetModel) {} // null override
     setStyles(): void {
         let elementStyles = this.model.get("styleDict");
         if (elementStyles.length === 0) {
@@ -169,10 +169,15 @@ export class ActiveHTMLView extends DOMWidgetView {
             }
             for (let prop in elementStyles) {
                 if (elementStyles.hasOwnProperty(prop)) {
-                    // console.log(">", prop, elementStyles[prop]);
+                    // console.log(">>>", prop, elementStyles[prop], typeof prop);
                     this.el.style.setProperty(prop, elementStyles[prop]);
+                    // console.log("<<<", prop, this.el.style.getPropertyValue(prop));
                     this._currentStyles.add(prop);
                 }
+            }
+
+            if (this.model.get("_debugPrint")) {
+                console.log(this.el, "final styles:", this.el.style);
             }
         }
     }
@@ -381,6 +386,7 @@ export class ActiveHTMLView extends DOMWidgetView {
 
     render() {
         super.render();
+        this.el.classList.remove('lm-Widget', 'p-Widget')
         this.update();
     }
     update(): void {
