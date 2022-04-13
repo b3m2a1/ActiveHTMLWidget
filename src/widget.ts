@@ -141,6 +141,7 @@ export class ActiveHTMLView extends DOMWidgetView {
         this.listenTo(this.model, 'change:elementAttributes', this.updateAttributes);
         this.listenTo(this.model, 'change:eventPropertiesDict', this.updateEvents);
         this._currentEvents = {};
+        this._currentClasses = new Set();
         this._currentStyles = new Set();
     }
 
@@ -183,15 +184,33 @@ export class ActiveHTMLView extends DOMWidgetView {
     }
 
     // Manage classes
-    updateClassList(): void {
+    _currentClasses: Set<string>;
+    setClasses(): void {
         if (this.model.get("_debugPrint")) {
             console.log(this.el, "Element Classes:", this.model.get("classList"));
         }
-        //@ts-ignore
-        this.el.classList.remove(...this.el.classList);
-        for (let cls of this.model.get("classList")) {
+        let classList = this.model.get("classList");
+        for (let cls of classList) {
             this.el.classList.add(cls);
+            this._currentClasses.add(cls);
         }
+    }
+    removeClasses(): void {
+        if (this.model.get("_debugPrint")) {
+            console.log(this.el, "Element Classes:", this.model.get("classList"));
+        }
+        let current = this._currentClasses;
+        let classes = this.model.get("classList");
+        for (let prop of current) {
+            if (!classes.includes(prop)) {
+                this.el.classList.remove(prop);
+                this._currentClasses.delete(prop);
+            }
+        }
+    }
+    updateClassList(): void {
+        this.setClasses();
+        this.removeClasses();
     }
 
     //manage body of element (borrowed from ipywidgets.Box)
@@ -325,11 +344,23 @@ export class ActiveHTMLView extends DOMWidgetView {
     updateValue() {
         let el = this.el as HTMLInputElement;
         if (el !== undefined) {
-            let val = el.value;
-            if (val !== undefined) {
-                let newVal = this.model.get('value');
-                if (newVal !== val) {
-                    el.value = newVal;
+            let is_checkbox = el.getAttribute('type') === 'checkbox';
+            if (is_checkbox) {
+                let checked = el.checked;
+                if (checked !== undefined) {
+                    let newVal = this.model.get('value');
+                    let checkVal = newVal.length > 0 && newVal != "false" && newVal != "0";
+                    if (checkVal !== checked) {
+                        el.checked = newVal;
+                    }
+                }
+            } else {
+                let val = el.value;
+                if (val !== undefined) {
+                    let newVal = this.model.get('value');
+                    if (newVal !== val) {
+                        el.value = newVal;
+                    }
                 }
             }
         }
@@ -435,10 +466,19 @@ export class ActiveHTMLView extends DOMWidgetView {
     }
     handleChanged(e: Event) {
         let target = e.target as HTMLInputElement;
-        let val = target.value;
-        if (val !== undefined) {
-            this.model.set('value', val, {updated_view: this});
-            this.touch();
+        let is_checkbox = this.el.getAttribute('type') === 'checkbox';
+        if (is_checkbox) {
+            let checked = target.checked;
+            if (checked !== undefined) {
+                this.model.set('value', checked ? "true" : "false", {updated_view: this});
+                this.touch();
+            }
+        } else {
+            let val = target.value;
+            if (val !== undefined) {
+                this.model.set('value', val, {updated_view: this});
+                this.touch();
+            }
         }
     }
 
