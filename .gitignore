@@ -154,3 +154,5 @@ ActiveHTMLWidget/labextension/*.tgz
 
 # Packed lab extensions
 ActiveHTMLWidget/labextension
+
+.sass-cache

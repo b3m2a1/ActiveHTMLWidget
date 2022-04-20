@@ -11,6 +11,7 @@ import {
     ISerializers,
 } from '@jupyter-widgets/base';
 
+
 import {MODULE_NAME, MODULE_VERSION} from './version';
 
 import {Widget, PanelLayout} from '@lumino/widgets';
@@ -20,8 +21,8 @@ import {
 } from '@lumino/messaging';
 import $ from 'jquery';
 
-// Import the CSS
-import '../css/widget.css';
+// // Import the CSS
+// import '../css/widget.css';
 
 namespace PatchedPhosphorWidget {
     export interface IOptions {
@@ -351,7 +352,7 @@ export class ActiveHTMLView extends DOMWidgetView {
                     let newVal = this.model.get('value');
                     let checkVal = newVal.length > 0 && newVal != "false" && newVal != "0";
                     if (checkVal !== checked) {
-                        el.checked = newVal;
+                        el.checked = checkVal;
                     }
                 }
             } else {
