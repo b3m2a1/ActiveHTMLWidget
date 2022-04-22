@@ -20,6 +20,7 @@ import {
     Message, MessageLoop
 } from '@lumino/messaging';
 import $ from 'jquery';
+import 'bootstrap';
 
 // // Import the CSS
 // import '../css/widget.css';
@@ -483,9 +484,23 @@ export class ActiveHTMLView extends DOMWidgetView {
         }
     }
 
-    constructEventListener(eventName:string, props:string[]) {
+    constructEventListener(eventName:string, propData:object|string[]) {
         let parent = this;
         return function (e:Event) {
+            let props:string[];
+            if (Array.isArray(propData)) {
+                props = propData;
+            } else if (propData === undefined || propData === null) {
+                props = parent.model.get('defaultEventProperties');
+            } else {
+                //@ts-ignore
+                props = propData['fields'];
+                //@ts-ignore
+                let prop = propData['propagate'];
+                if (prop !== true) {
+                    e.stopPropagation();
+                }
+            }
             let debug = parent.model.get('_debugPrint');
             if (debug) {
                 console.log(parent.el, "Handling event:", eventName)
@@ -522,7 +537,6 @@ export class ActiveHTMLView extends DOMWidgetView {
         return eventMessage;
     }
     sendEventMessage(e: Event, message?:Record<string, any>) {
-        e.stopPropagation();
         if (message === undefined) {
             message = this.constructEventMessage(e);
         }

@@ -8,12 +8,13 @@
 @import "../node_modules/bootstrap/scss/mixins";
 @import "../node_modules/bootstrap/scss/utilities";
 
+$enable-cssgrid: true;
+
 // Layout & components
 @import "../node_modules/bootstrap/scss/root";
 
 .jhtml {
   @import "../node_modules/bootstrap/scss/bootstrap";
-
   // shim
   .form-check {
     .form-check-input {
