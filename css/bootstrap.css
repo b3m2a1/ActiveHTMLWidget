@@ -7279,7 +7279,13 @@
       display: inline-flex !important; }
     .jhtml .d-print-none {
       display: none !important; } }
-  .jhtml .form-check .form-check-input {
+  .jhtml .form-check-input {
+    -webkit-appearance: none;
+    -moz-appearance: none; }
+  .jhtml .form-select {
+    -webkit-appearance: none;
+    -moz-appearance: none; }
+  .jhtml .form-range {
     -webkit-appearance: none;
     -moz-appearance: none; }
 

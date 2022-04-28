@@ -16,11 +16,17 @@ $enable-cssgrid: true;
 .jhtml {
   @import "../node_modules/bootstrap/scss/bootstrap";
   // shim
-  .form-check {
-    .form-check-input {
-      -webkit-appearance: none;
-      -moz-appearance: none;
-    }
+  .form-check-input {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+  }
+  .form-select {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+  }
+  .form-range{
+    -webkit-appearance: none;
+    -moz-appearance: none;
   }
 }
 
