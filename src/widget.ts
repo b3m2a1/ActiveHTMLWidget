@@ -346,7 +346,8 @@ export class ActiveHTMLView extends DOMWidgetView {
     updateValue() {
         let el = this.el as HTMLInputElement;
         if (el !== undefined) {
-            let is_checkbox = el.getAttribute('type') === 'checkbox';
+            let is_checkbox = el.getAttribute('type') === 'checkbox' || el.getAttribute('type') === 'radio';
+            let multiple = el.getAttribute('multiple');
             if (is_checkbox) {
                 let checked = el.checked;
                 if (checked !== undefined) {
@@ -354,6 +355,27 @@ export class ActiveHTMLView extends DOMWidgetView {
                     let checkVal = newVal.length > 0 && newVal != "false" && newVal != "0";
                     if (checkVal !== checked) {
                         el.checked = checkVal;
+                    }
+                }
+            } else if (multiple) {
+                let el = this.el as HTMLSelectElement;
+                let opts = el.selectedOptions;
+                if (opts !== undefined) {
+                    let val = [];
+                    for(let i = 0; i < opts.length; i++) {
+                        let o = opts[i];
+                        val.push(o.value);
+                    }
+                    let newValStr = this.model.get('value');
+                    if (typeof newValStr === 'string') {
+                        let testVal = val.join('&&');
+                        if (newValStr !== testVal) {
+                            let splitVals = newValStr.split("&&");
+                            for(let i = 0; i < el.options.length; i++) {
+                                let o = el.options[i];
+                                o.selected = (splitVals.indexOf(o.value) > -1);
+                            }
+                        }
                     }
                 }
             } else {
@@ -468,11 +490,26 @@ export class ActiveHTMLView extends DOMWidgetView {
     }
     handleChanged(e: Event) {
         let target = e.target as HTMLInputElement;
-        let is_checkbox = this.el.getAttribute('type') === 'checkbox';
+        let el = this.el;
+        let is_checkbox = el.getAttribute('type') === 'checkbox' || el.getAttribute('type') === 'radio';
+        let multiple = el.getAttribute('multiple');
         if (is_checkbox) {
             let checked = target.checked;
             if (checked !== undefined) {
                 this.model.set('value', checked ? "true" : "false", {updated_view: this});
+                this.touch();
+            }
+        } else if (multiple) {
+            let el = this.el as HTMLSelectElement;
+            let opts = el.selectedOptions;
+            if (opts !== undefined) {
+                let val = [];
+                for(let i = 0; i < opts.length; i++) {
+                    let o = opts[i];
+                    val.push(o.value);
+                }
+                let newVal = val.join('&&');
+                this.model.set('value', newVal, {updated_view: this});
                 this.touch();
             }
         } else {
