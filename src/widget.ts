@@ -345,6 +345,7 @@ export class ActiveHTMLView extends DOMWidgetView {
     }
     updateValue() {
         let el = this.el as HTMLInputElement;
+        let debug = this.model.get("_debugPrint");
         if (el !== undefined) {
             let is_checkbox = el.getAttribute('type') === 'checkbox' || el.getAttribute('type') === 'radio';
             let multiple = el.getAttribute('multiple');
@@ -353,6 +354,9 @@ export class ActiveHTMLView extends DOMWidgetView {
                 if (checked !== undefined) {
                     let newVal = this.model.get('value');
                     let checkVal = newVal.length > 0 && newVal != "false" && newVal != "0";
+                    if (debug) {
+                        console.log('updating checked', checked, "->", checkVal);
+                    }
                     if (checkVal !== checked) {
                         el.checked = checkVal;
                     }
@@ -369,6 +373,9 @@ export class ActiveHTMLView extends DOMWidgetView {
                     let newValStr = this.model.get('value');
                     if (typeof newValStr === 'string') {
                         let testVal = val.join('&&');
+                        if (debug) {
+                            console.log('updating selection', testVal, "->", newValStr);
+                        }
                         if (newValStr !== testVal) {
                             let splitVals = newValStr.split("&&");
                             for(let i = 0; i < el.options.length; i++) {
@@ -382,6 +389,9 @@ export class ActiveHTMLView extends DOMWidgetView {
                 let val = el.value;
                 if (val !== undefined) {
                     let newVal = this.model.get('value');
+                    if (debug) {
+                        console.log('updating value', val, "->", newVal);
+                    }
                     if (newVal !== val) {
                         el.value = newVal;
                     }
@@ -442,11 +452,11 @@ export class ActiveHTMLView extends DOMWidgetView {
         this.updateBody();
         // this.updateTextContent();
         this.updateAttribute('id');
-        this.updateValue();
         this.updateAttributes();
         this.updateClassList();
         this.setStyles();
         this.setEvents();
+        this.updateValue();
         // this.el.classList = this.model.get("classList");
     }
 
