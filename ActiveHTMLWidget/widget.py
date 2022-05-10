@@ -26,9 +26,12 @@ class HTMLElement(DOMWidget):
     children = TypedTuple(trait=Instance(Widget)).tag(sync=True, **widget_serialization)
     id = Unicode('').tag(sync=True)
     value = Unicode('').tag(sync=True)
+    exportData = Dict().tag(sync=True)
     trackInput = Bool(False).tag(sync=True)
     continuousUpdate = Bool(True).tag(sync=True)
     eventPropertiesDict = Dict().tag(sync=True)
+    jsHandlers = Dict().tag(sync=True)
+    oninitialize = Dict().tag(sync=True)
     defaultEventProperties = List(default_value=[
         "bubbles", "cancelable", "composed",
         "target", "timestamp", "type",

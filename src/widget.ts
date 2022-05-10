@@ -11,7 +11,6 @@ import {
     ISerializers,
 } from '@jupyter-widgets/base';
 
-
 import {MODULE_NAME, MODULE_VERSION} from './version';
 
 import {Widget, PanelLayout} from '@lumino/widgets';
@@ -19,8 +18,9 @@ import {ArrayExt} from '@lumino/algorithm';
 import {
     Message, MessageLoop
 } from '@lumino/messaging';
-import $ from 'jquery';
-import 'bootstrap';
+import $, * as jquery from 'jquery';
+import * as bootstrap from 'bootstrap';
+// import {JupyterFrontEnd} from "@jupyterlab/application";
 
 // // Import the CSS
 // import '../css/widget.css';
@@ -69,6 +69,17 @@ class LayoutManagerWidget extends Widget {
 
 export class ActiveHTMLModel extends DOMWidgetModel {
 
+    // _ihandlers: Record<string, [number, any]>;
+    // constructor() {
+    //     super();
+    // }
+    initialize(attributes: any, options: { model_id: string; comm?: any; widget_manager: any }) {
+        super.initialize(attributes, options);
+        // this._ihandlers= {};
+        this._updateHandlers();
+        this.on('change:jsHandlers', this._updateHandlers, this);
+    }
+
     defaults() {
         return {
             ...super.defaults(),
@@ -98,7 +109,11 @@ export class ActiveHTMLModel extends DOMWidgetModel {
                 "key", "repeat",
                 "button", "buttons",
                 "alKey", "shiftKey", "ctrlKey", "metaKey"
-            ]
+            ],
+            jsHandlers: {},
+            _ihandlers: {},
+            oninitialize: {},
+            exportData: {}
         };
     }
 
@@ -115,6 +130,49 @@ export class ActiveHTMLModel extends DOMWidgetModel {
     static view_name = 'ActiveHTMLView'; // Set to null if no view
     static view_module = MODULE_NAME; // Set to null if no view
     static view_module_version = MODULE_VERSION;
+
+    _defineHandler(name:string, body:string) {
+        // adapted from SO to define a named handler
+        let lines = ['return function ' + name + '(event, widget, context) {' ];
+        lines.push('\"use strict\";');
+        lines.push(body);
+        lines.push("}")
+        return new Function(lines.join("\n"))();
+    }
+    _stringHash(str:string):number {
+          // just needed a simple one so: https://stackoverflow.com/questions/7616461/generate-a-hash-from-string-in-javascript
+          var hash = 0, i, chr;
+          if (str.length === 0) return hash;
+          for (i = 0; i < str.length; i++) {
+            chr   = str.charCodeAt(i);
+            hash  = ((hash << 5) - hash) + chr;
+            hash |= 0; // Convert to 32bit integer
+          }
+          return hash;
+    }
+    _updateHandlers(): void {
+        let handlers = this.get('jsHandlers') as Record<string, string>;
+        let debug = this.get('_debugPrint');
+        let _ihandlers = this.get('_ihandlers');
+        for (let h in handlers) {
+            if (handlers.hasOwnProperty(h)) {
+                let hash = this._stringHash(handlers[h]);
+                if (
+                    (!_ihandlers.hasOwnProperty(h)) ||
+                    (_ihandlers[h][0] !== hash)
+                ) {
+                    if (debug) {
+                        console.log('adding handler', h)
+                    }
+                    _ihandlers[h] = [hash, this._defineHandler(h, handlers[h])];
+                }
+            }
+        }
+    }
+
+    // callHandler(handler:string, widget:'ActiveHTMLView', event:Event) {
+    //     this._ihandlers[handler][1](widget, event);
+    // }
 
 }
 
@@ -145,6 +203,10 @@ export class ActiveHTMLView extends DOMWidgetView {
         this._currentEvents = {};
         this._currentClasses = new Set();
         this._currentStyles = new Set();
+        let oninit = this.model.get('oninitialize');
+        if (Object.keys(oninit).length > 0) {
+            this.handleEvent(new Event('fake', {}), 'oninitialize', oninit);
+        }
     }
 
     // Manage CSS styles
@@ -531,29 +593,69 @@ export class ActiveHTMLView extends DOMWidgetView {
         }
     }
 
-    constructEventListener(eventName:string, propData:object|string[]) {
+    setData(key:string, value:any) {
+        let data = this.model.get('exportData') as Record<string, any>;
+        data[key] = value;
+        this.model.set('exportData', {}, {updated_view:this}); // force a state change
+        this.model.set('exportData', data, {updated_view:this});
+        this.touch()
+    }
+    static handlerContext = {
+        'bootstrap': bootstrap,
+        "$": $,
+        "jquery": jquery,
+        // "JupyterFrontEnd": JupyterFrontEnd
+    };
+    handleEvent(e:Event, eventName:string, propData:Record<string, any>|string[]|string) {
+        let props:string[];
+        let method = "";
+        let send = true;
+        if (Array.isArray(propData)) {
+            props = propData;
+        } else if (propData === undefined || propData === null) {
+            props = this.model.get('defaultEventProperties');
+        } else if (typeof propData === 'string') {
+            method = propData;
+            props = [];
+        } else {
+            method = propData['method'];
+            if (method === undefined || method === null) {
+                method = "";
+            } else {
+                send = propData.hasOwnProperty('notify') && propData['notify'] === true;
+            }
+            if (propData.hasOwnProperty('fields')) {
+                props = propData['fields'];
+            } else {
+                props = this.model.get('defaultEventProperties');
+            }
+            let prop = propData['propagate'] !== true;
+            if (prop) {
+                e.stopPropagation();
+            }
+        }
+        let debug = this.model.get('_debugPrint');
+        if (debug) {
+            console.log(this.el, "Handling event:", eventName, propData);
+            if (method !== "") {
+                console.log(this.el, "calling handler", method);
+            }
+        }
+        // console.log("|", eventName, props);
+        if (method !== "") {
+            this.callHandler(method, e);
+        }
+        if (send) {
+            this.sendEventMessage(e, this.constructEventMessage(e, props, eventName));
+        }
+    }
+    callHandler(method:string, event:Event) {
+        this.model.get('_ihandlers')[method][1](event, this, ActiveHTMLView.handlerContext); // inline caller for now b.c. not sure how to make it go otherwise
+    }
+    constructEventListener(eventName:string, propData:object|string[]|string) {
         let parent = this;
         return function (e:Event) {
-            let props:string[];
-            if (Array.isArray(propData)) {
-                props = propData;
-            } else if (propData === undefined || propData === null) {
-                props = parent.model.get('defaultEventProperties');
-            } else {
-                //@ts-ignore
-                props = propData['fields'];
-                //@ts-ignore
-                let prop = propData['propagate'];
-                if (prop !== true) {
-                    e.stopPropagation();
-                }
-            }
-            let debug = parent.model.get('_debugPrint');
-            if (debug) {
-                console.log(parent.el, "Handling event:", eventName)
-            }
-            // console.log("|", eventName, props);
-            parent.sendEventMessage(e, parent.constructEventMessage(e, props, eventName));
+            parent.handleEvent(e, eventName, propData);
         };
     }
     constructEventMessage(e: Event, props?:string[], eventName?:string) {
