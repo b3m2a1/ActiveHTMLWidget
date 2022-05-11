@@ -203,10 +203,7 @@ export class ActiveHTMLView extends DOMWidgetView {
         this._currentEvents = {};
         this._currentClasses = new Set();
         this._currentStyles = new Set();
-        let oninit = this.model.get('oninitialize');
-        if (Object.keys(oninit).length > 0) {
-            this.handleEvent(new Event('fake', {}), 'oninitialize', oninit);
-        }
+        this._initted = false;
     }
 
     // Manage CSS styles
@@ -505,10 +502,18 @@ export class ActiveHTMLView extends DOMWidgetView {
         this.removeEvents();
     }
 
+    _initted: boolean;
     render() {
         super.render();
         this.el.classList.remove('lm-Widget', 'p-Widget')
         this.update();
+        if (!this._initted) {
+            let oninit = this.model.get('oninitialize');
+            if (Object.keys(oninit).length > 0) {
+                this.handleEvent(new Event('fake', {}), 'oninitialize', oninit);
+            }
+        }
+        this._initted = true;
     }
     update(): void {
         this.updateBody();
