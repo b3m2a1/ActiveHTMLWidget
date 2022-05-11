@@ -8,7 +8,7 @@ import {
     DOMWidgetView,
     WidgetModel,
     ViewList,
-    ISerializers,
+    ISerializers, WidgetView,
 } from '@jupyter-widgets/base';
 
 import {MODULE_NAME, MODULE_VERSION} from './version';
@@ -112,7 +112,7 @@ export class ActiveHTMLModel extends DOMWidgetModel {
             ],
             jsHandlers: {},
             _ihandlers: {},
-            oninitialize: {},
+            onevents: {},
             exportData: {}
         };
     }
@@ -121,7 +121,11 @@ export class ActiveHTMLModel extends DOMWidgetModel {
         ...DOMWidgetModel.serializers,
         // Add any extra serializers here
         //@ts-ignore
-        children: {deserialize: unpack_models}
+        children: {deserialize: unpack_models},
+        //@ts-ignore
+        elementAttributes: {deserialize: unpack_models},
+        //@ts-ignore
+        exportData: {deserialize: unpack_models},
     };
 
     static model_name = 'ActiveHTMLModel';
@@ -201,6 +205,7 @@ export class ActiveHTMLView extends DOMWidgetView {
         this.listenTo(this.model, 'change:elementAttributes', this.updateAttributes);
         this.listenTo(this.model, 'change:eventPropertiesDict', this.updateEvents);
         this._currentEvents = {};
+        this._currentOnHandlers = {};
         this._currentClasses = new Set();
         this._currentStyles = new Set();
         this._initted = false;
@@ -312,7 +317,7 @@ export class ActiveHTMLView extends DOMWidgetView {
             this.pWidget.insertWidget(i, view.pWidget);
             dummy.dispose();
             return view;
-        }).catch(reject('Could not add child view to box', true));
+        }).catch(reject('Could not add child view to HTMLElement', true));
     }
     children_views: ViewList<DOMWidgetView> | null;
     remove(): void {
@@ -389,17 +394,38 @@ export class ActiveHTMLView extends DOMWidgetView {
             this.el.setAttribute(attrName, val);
         }
     }
+    _modelHTMLSetter(prop:string, val:WidgetView) {
+        let parent = this;
+        function setHTML() {
+            console.log(val.el);
+            parent.el.setAttribute(prop, val.el.outerHTML);
+        }
+        return setHTML;
+    }
     updateAttributes() {
         let attrs = this.model.get('elementAttributes');
         let debug = this.model.get("_debugPrint");
         if (debug) { console.log(this.el, "Element Properties:", attrs); }
         for (let prop in attrs) {
-            let val = attrs[prop];
+            let val = attrs[prop] as string|object;
             if (val === "") {
                 this.el.removeAttribute(prop);
-            } else {
+            }  else if (typeof val === 'string') {
                 this.el.setAttribute(prop, val);
+            } else if (val instanceof WidgetView) {
+                let setter = this._modelHTMLSetter(prop, val);
+                val.model.on("changed", setter, val);
+                setter();
+            } else if (val instanceof WidgetModel) {
+                this.create_child_view(val).then((view: DOMWidgetView) => {
+                    let setter = this._modelHTMLSetter(prop, view);
+                    view.model.on("changed", setter, view);
+                    setter();
+                }).catch(reject('Could not add child view to HTMLElement', true));
+            } else {
+                this.el.setAttribute(prop, val.toString() + Object.keys(val).toString());
             }
+
         }
     }
     updateValue() {
@@ -502,15 +528,61 @@ export class ActiveHTMLView extends DOMWidgetView {
         this.removeEvents();
     }
 
+    _currentOnHandlers: Record<string, any>;
+    setOnHandlers() {
+        let listeners = this.model.get('onevents') as Record<string, object>;
+        let debug = this.model.get("_debugPrint");
+        if (debug) { console.log(this.el, "Adding On Handlers:", listeners); }
+        for (let key in listeners) {
+            if (listeners.hasOwnProperty(key)) {
+                if (!this._currentOnHandlers.hasOwnProperty(key)) {
+                    this._currentOnHandlers[key] = [
+                        listeners[key],
+                        this.constructOnHandler(key, listeners[key])
+                    ];
+                    this.model.on(key, this._currentOnHandlers[key][1], this);
+                } else if (this._currentOnHandlers[key][0] !== listeners[key]) {
+                    this.model.off(key, this._currentOnHandlers[key][1], this);
+                    this._currentOnHandlers[key] = [
+                        listeners[key],
+                        this.constructEventListener(key, listeners[key])
+                    ];
+                    this.model.on(key, this._currentOnHandlers[key][1], this);
+                }
+            }
+        }
+    }
+    removeOnHandlers(): void {
+        let newListeners = this.model.get('onevents') as Record<string, string[]>;
+        let current = this._currentOnHandlers;
+        let debug = this.model.get("_debugPrint");
+        for (let prop in current) {
+            if (current.hasOwnProperty(prop)) {
+                if (!newListeners.hasOwnProperty(prop)) {
+                    if (debug) { console.log(this.el, "Removing On Handler:", prop); }
+                    this.model.off(prop, current[prop][1], this);
+                    current.delete(prop);
+                }
+            }
+        }
+    }
+    updateOnHandlers(): void {
+        this.setOnHandlers();
+        this.removeOnHandlers();
+    }
+
     _initted: boolean;
     render() {
         super.render();
         this.el.classList.remove('lm-Widget', 'p-Widget')
         this.update();
         if (!this._initted) {
-            let oninit = this.model.get('oninitialize');
-            if (Object.keys(oninit).length > 0) {
-                this.handleEvent(new Event('fake', {}), 'oninitialize', oninit);
+            let onevents = this.model.get('onevents') as Record<string, object>;
+            if (onevents.hasOwnProperty('initialize')) {
+                let oninit = onevents['initialize'];
+                if (Object.keys(oninit).length > 0) {
+                    this.handleEvent(new Event('fake', {}), 'oninitialize', oninit);
+                }
             }
         }
         this._initted = true;
@@ -523,6 +595,7 @@ export class ActiveHTMLView extends DOMWidgetView {
         this.updateClassList();
         this.setStyles();
         this.setEvents();
+        this.setOnHandlers();
         this.updateValue();
         // this.el.classList = this.model.get("classList");
     }
@@ -655,13 +728,20 @@ export class ActiveHTMLView extends DOMWidgetView {
         }
     }
     callHandler(method:string, event:Event) {
-        this.model.get('_ihandlers')[method][1](event, this, ActiveHTMLView.handlerContext); // inline caller for now b.c. not sure how to make it go otherwise
+        let fn = this.model.get('_ihandlers')[method][1] as ((event:Event, widget:WidgetView, context:object) => void);
+        fn.call(this, event, this, ActiveHTMLView.handlerContext);
     }
     constructEventListener(eventName:string, propData:object|string[]|string) {
         let parent = this;
         return function (e:Event) {
             parent.handleEvent(e, eventName, propData);
         };
+    }
+    constructOnHandler(eventName:string, propData:object|string[]|string) {
+        let listener = this.constructEventListener(eventName, propData);
+        return function () {
+            return listener(new Event(eventName, {}));
+        }
     }
     constructEventMessage(e: Event, props?:string[], eventName?:string) {
         if (props === undefined || props === null) {
