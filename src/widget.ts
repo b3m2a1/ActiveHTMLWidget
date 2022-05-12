@@ -114,6 +114,7 @@ export class ActiveHTMLModel extends DOMWidgetModel {
                 "alKey", "shiftKey", "ctrlKey", "metaKey"
             ],
             jsHandlers: {},
+            jsAPI: null,
             _ihandlers: {},
             onevents: {},
             exportData: {}
@@ -129,6 +130,8 @@ export class ActiveHTMLModel extends DOMWidgetModel {
         elementAttributes: {deserialize: unpack_models},
         //@ts-ignore
         exportData: {deserialize: unpack_models},
+        //@ts-ignore
+        jsAPI: {deserialize: unpack_models}
     };
 
     static model_name = 'ActiveHTMLModel';
@@ -185,18 +188,47 @@ export class ActiveHTMLModel extends DOMWidgetModel {
         //     console.log("Message In:", data.method);
         // }
 
-        if (method === "call") {
+        if (method === "trigger") {
             this.trigger(data.content['handle'], data.content, msg.buffers);
+            return Promise.resolve();
+        } else if (method === "call") {
+            this.callHandler(data.content['handle'],
+                this.dummyEvent(data.content['handle'], {content:data.content, buffers:msg.buffers})
+            );
             return Promise.resolve();
         } else {
             return super._handle_comm_msg(msg);
         }
-
     }
 
-    // callHandler(handler:string, widget:'ActiveHTMLView', event:Event) {
-    //     this._ihandlers[handler][1](widget, event);
-    // }
+    dummyEvent(name:string, ops:object={}):Event {
+        return {
+            target:this,
+            type:name,
+            stopPropagation: function (){},
+            ...ops
+        } as unknown as Event; // a hack only so we can use the same interface for custom events
+    }
+    callHandler(method:string, event:Event) {
+        let handlers = this.get('_ihandlers') as Record<string, any>;
+        let fn: ((event:Event, widget:WidgetModel, context:object) => void)|null = null;
+        if (handlers.hasOwnProperty(method)) {
+            fn = handlers[method][1];
+        } else {
+            let api = this.get('jsAPI');
+            if (api !== null) {
+                handlers = api.get("_ihandlers");
+                if (handlers.hasOwnProperty(method)) {
+                    fn = handlers[method][1];
+                }
+            }
+        }
+        if (fn !== null) {
+            fn.call(this, event, this, ActiveHTMLView.handlerContext);
+        } else {
+            throw new Error("couldn't find handler " + method);
+        }
+    }
 
 }
 
@@ -919,14 +951,31 @@ export class ActiveHTMLView extends DOMWidgetView {
         }
     }
     callHandler(method:string, event:Event) {
-        let fn = this.model.get('_ihandlers')[method][1] as ((event:Event, widget:WidgetView, context:object) => void);
-        fn.call(this, event, this, ActiveHTMLView.handlerContext);
+        let handlers = this.model.get('_ihandlers') as Record<string, any>;
+        let fn: ((event:Event, widget:WidgetView, context:object) => void)|null = null;
+        if (handlers.hasOwnProperty(method)) {
+            fn = handlers[method][1];
+        } else {
+            let api = this.model.get('jsAPI');
+            if (api !== null) {
+                handlers = api.get("_ihandlers");
+                if (handlers.hasOwnProperty(method)) {
+                    fn = handlers[method][1];
+                }
+            }
+        }
+        if (fn !== null) {
+            fn.call(this, event, this, ActiveHTMLView.handlerContext);
+        } else {
+            throw new Error("couldn't find handler " + method);
+        }
     }
-    dummyEvent(name:string):Event {
+    dummyEvent(name:string, ops:object={}):Event {
         return {
             target:this.el,
             type:name,
-            stopPropagation: function (){}
+            stopPropagation: function (){},
+            ...ops
         } as unknown as Event; // a hack only so we can use the same interface for custom events
     }
     constructEventListener(eventName:string, propData:object|string[]|string) {
@@ -938,8 +987,8 @@ export class ActiveHTMLView extends DOMWidgetView {
     constructOnHandler(eventName:string, propData:object|string[]|string) {
         let listener = this.constructEventListener(eventName, propData);
         let event = this.dummyEvent(eventName);
-        return function () {
-            return listener(event);
+        return function (msg:object) {
+            return listener({...msg, ...event});
         }
     }
     constructEventMessage(e: Event, props?:string[], eventName?:string) {
@@ -979,5 +1028,4 @@ export class ActiveHTMLView extends DOMWidgetView {
         }
         this.send(message);
     }
-
 }

@@ -31,6 +31,7 @@ class HTMLElement(DOMWidget):
     continuousUpdate = Bool(True).tag(sync=True)
     eventPropertiesDict = Dict().tag(sync=True)
     jsHandlers = Dict().tag(sync=True)
+    jsAPI = Instance(Widget, allow_none=True).tag(sync=True, **widget_serialization)
     onevents = Dict().tag(sync=True)
     defaultEventProperties = List(default_value=[
         "bubbles", "cancelable", "composed",
@@ -109,7 +110,13 @@ class HTMLElement(DOMWidget):
         if copied:
             return HTML("<h4>Extension installed. You will need to reload the page to get the widgets to display.</h1>")
 
-    def trigger(self, method, content=None, buffers=None):
+    def trigger(self, event, content=None, buffers=None):
+        if content is None:
+            content = {}
+        content = content.copy()
+        content['handle'] = event
+        return self._send({"method": "trigger", "content": content}, buffers=buffers)
+    def call(self, method, content=None, buffers=None):
         if content is None:
             content = {}
         content = content.copy()
