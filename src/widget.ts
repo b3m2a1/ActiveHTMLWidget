@@ -18,6 +18,9 @@ import {ArrayExt} from '@lumino/algorithm';
 import {
     Message, MessageLoop
 } from '@lumino/messaging';
+import {
+    KernelMessage
+} from '@jupyterlab/services';
 import $, * as jquery from 'jquery';
 import * as bootstrap from 'bootstrap';
 // import {JupyterFrontEnd} from "@jupyterlab/application";
@@ -174,6 +177,23 @@ export class ActiveHTMLModel extends DOMWidgetModel {
         }
     }
 
+    _handle_comm_msg(msg: KernelMessage.ICommMsgMsg): Promise<void> {
+        const data = msg.content.data as any;
+        let method = data.method;
+
+        // if (this.get("_debugPrint")) {
+        //     console.log("Message In:", data.method);
+        // }
+
+        if (method === "call") {
+            this.trigger(data.content['handle'], data.content, msg.buffers);
+            return Promise.resolve();
+        } else {
+            return super._handle_comm_msg(msg);
+        }
+
+    }
+
     // callHandler(handler:string, widget:'ActiveHTMLView', event:Event) {
     //     this._ihandlers[handler][1](widget, event);
     // }
@@ -213,70 +233,84 @@ export class ActiveHTMLView extends DOMWidgetView {
 
     // Manage CSS styles
     _currentStyles: Set<string>;
-    removeStyles(): void {
-        let newStyles = this.model.get("styleDict");
+    removeStyles(): Promise<any> {
+        let newStyles = this.model.get("styleDict") as Record<string, string>;
         let current = this._currentStyles;
-        for (let prop of current) {
-            if (!newStyles.hasOwnProperty(prop)) {
-                this.el.style.removeProperty(prop);
-                this._currentStyles.delete(prop);
+        return ActiveHTMLView._each(
+            current,
+            (prop) => {
+                if (!newStyles.hasOwnProperty(prop)) {
+                    this.el.style.removeProperty(prop);
+                    this._currentStyles.delete(prop);
+                }
             }
-        }
+        )
     }
     setLayout(layout: WidgetModel, oldLayout?: WidgetModel) {} // null override
     setStyle(style: WidgetModel, oldStyle?: WidgetModel) {} // null override
-    setStyles(): void {
-        let elementStyles = this.model.get("styleDict");
-        if (elementStyles.length === 0) {
+    setStyles(): Promise<any> {
+        let elementStyles = this.model.get("styleDict") as Record<string, string>;
+        let keys = Object.keys(elementStyles);
+        if (keys.length === 0) {
             this._currentStyles.clear();
             this.el.removeAttribute('style');
+            return ActiveHTMLView._defaultPromise();
         } else {
             if (this.model.get("_debugPrint")) {
                 console.log(this.el, "Element Styles:", elementStyles);
             }
-            for (let prop in elementStyles) {
-                if (elementStyles.hasOwnProperty(prop)) {
-                    // console.log(">>>", prop, elementStyles[prop], typeof prop);
-                    this.el.style.setProperty(prop, elementStyles[prop]);
-                    // console.log("<<<", prop, this.el.style.getPropertyValue(prop));
-                    this._currentStyles.add(prop);
+            return ActiveHTMLView._each(
+                keys,
+                (prop:string) => {
+                    if (elementStyles.hasOwnProperty(prop)) {
+                        // console.log(">>>", prop, elementStyles[prop], typeof prop);
+                        this.el.style.setProperty(prop, elementStyles[prop]);
+                        // console.log("<<<", prop, this.el.style.getPropertyValue(prop));
+                        this._currentStyles.add(prop);
+                    }
                 }
-            }
+            )
         }
     }
-    updateStyles() {
-        this.setStyles();
-        this.removeStyles();
+    updateStyles(): Promise<any> {
+        return this.setStyles().then(
+            ()=>this.removeStyles
+        )
     }
 
     // Manage classes
     _currentClasses: Set<string>;
-    setClasses(): void {
+    setClasses(): Promise<any> {
         if (this.model.get("_debugPrint")) {
             console.log(this.el, "Element Classes:", this.model.get("classList"));
         }
         let classList = this.model.get("classList");
-        for (let cls of classList) {
+        return ActiveHTMLView._each(
+            classList,
+            (cls:string)=> {
             this.el.classList.add(cls);
             this._currentClasses.add(cls);
-        }
+        })
     }
-    removeClasses(): void {
+    removeClasses(): Promise<any> {
         if (this.model.get("_debugPrint")) {
             console.log(this.el, "Element Classes:", this.model.get("classList"));
         }
         let current = this._currentClasses;
         let classes = this.model.get("classList");
-        for (let prop of current) {
-            if (!classes.includes(prop)) {
-                this.el.classList.remove(prop);
-                this._currentClasses.delete(prop);
-            }
-        }
+        return ActiveHTMLView._each(
+            current,
+            (cls:string)=> {
+                if (!classes.includes(cls)) {
+                    this.el.classList.remove(cls);
+                    this._currentClasses.delete(cls);
+                }
+            })
     }
-    updateClassList(): void {
-        this.setClasses();
-        this.removeClasses();
+    updateClassList():Promise<any> {
+        return this.setClasses().then(
+            ()=>this.removeClasses
+        )
     }
 
     //manage body of element (borrowed from ipywidgets.Box)
@@ -292,14 +326,16 @@ export class ActiveHTMLView extends DOMWidgetView {
         this.el = this.pWidget.node;
         this.$el = $(this.pWidget.node);
     }
-    update_children() {
+    update_children():Promise<any> {
         if (this.children_views !== null) {
-            this.children_views.update(this.model.get('children')).then((views: DOMWidgetView[]) => {
+            return this.children_views.update(this.model.get('children')).then((views: DOMWidgetView[]) => {
                 // Notify all children that their sizes may have changed.
                 views.forEach((view) => {
                     MessageLoop.postMessage(view.pWidget, Widget.ResizeMessage.UnknownSize);
                 });
             });
+        } else {
+            return ActiveHTMLView._defaultPromise();
         }
     }
     add_child_model(model: WidgetModel) {
@@ -322,28 +358,38 @@ export class ActiveHTMLView extends DOMWidgetView {
     children_views: ViewList<DOMWidgetView> | null;
     remove(): void {
         this.children_views = null;
+        let onevents = this.model.get('onevents') as Record<string, object>;
+        if (onevents.hasOwnProperty('remove')) {
+            let oninit = onevents['remove'];
+            // if (Object.keys(oninit).length > 0) {
+            this.handleEvent(this.dummyEvent('remove'), 'remove', oninit);
+            // }
+        }
         super.remove();
     }
 
-    updateBody(): void {
+    updateBody(): Promise<any> {
         let children = this.model.get('children');
         let debug = this.model.get("_debugPrint");
         if (children.length > 0) {
             if (debug) { console.log(this.el, "Updating Children..."); }
-            this.update_children();
+            return this.update_children();
         } else {
             let html = this.model.get("innerHTML");
             if (html.length > 0) {
                 if (debug) { console.log(this.el, "Updating HTML..."); }
                 this.updateInnerHTML();
+                    return ActiveHTMLView._defaultPromise();
             } else {
                 let text = this.model.get("textContent");
                 if (text.length > 0) {
                     if (debug) { console.log(this.el, "Updating Text..."); }
                     this.updateTextContent();
+                    return ActiveHTMLView._defaultPromise();
                 } else {
                     if (debug) { console.log(this.el, "Updating HTML..."); }
                     this.updateInnerHTML();
+                    return ActiveHTMLView._defaultPromise();
                 }
             }
         }
@@ -377,15 +423,15 @@ export class ActiveHTMLView extends DOMWidgetView {
         // }
     }
 
-    // Setting attributes (like id)
-    updateAttribute(attrName: string): void {
-        let val = this.model.get(attrName);
-        if (val === "") {
-            this.el.removeAttribute(attrName);
-        } else {
-            this.el.setAttribute(attrName, val);
-        }
+    getAttribute(attrName:string) {
+        return this.model.get('elementAttributes')[attrName];
     }
+    // Setting attributes (like id)
+    updateAttribute(attrName: string): Promise<any> {
+        let attrs = {} as Record<string, any>;
+        attrs[attrName] = this.model.get(attrName);
+        return this._updateAttribute(attrName, attrs);
+    };
     updateAttributeFromQuery(attrName: string, queryName: string): void {
         let val = this.model.get(queryName);
         if (val === "") {
@@ -394,41 +440,125 @@ export class ActiveHTMLView extends DOMWidgetView {
             this.el.setAttribute(attrName, val);
         }
     }
+    _escapesMap:Record<string, string> = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+      '/': '&#x2F;',
+      '`': '&#x60;',
+      '=': '&#x3D;'
+    };
+    _escapeHTML(html:string) {
+        let parent = this;
+        return String(html).replace(/[&<>"'`=\/]/g, function (s) {
+            return parent._escapesMap[s];
+          }
+        )
+    }
     _modelHTMLSetter(prop:string, val:WidgetView) {
         let parent = this;
-        function setHTML() {
-            console.log(val.el);
-            parent.el.setAttribute(prop, val.el.outerHTML);
+        function setHTML():Promise<any> {
+            let ud = val.update() as undefined|Promise<any>;
+            if (ud !== undefined) {
+                return ud.then(
+                    () => {
+                        let newHTML = val.el.outerHTML;
+                        let oldHTML = parent.el.getAttribute(prop);
+                        if (newHTML != oldHTML) {
+                            parent.el.setAttribute(prop, newHTML);
+                            return parent.notifyAttrUpdate(prop);
+                        } else {
+                            return ActiveHTMLView._defaultPromise();
+                        }
+                    }
+                )
+            } else {
+                let newHTML = val.el.outerHTML;
+                let oldHTML = parent.el.getAttribute(prop);
+                if (newHTML != oldHTML) {
+                    parent.el.setAttribute(prop, newHTML);
+                    return parent.notifyAttrUpdate(prop);
+                } else {
+                    return ActiveHTMLView._defaultPromise();
+                }
+            }
         }
         return setHTML;
     }
-    updateAttributes() {
-        let attrs = this.model.get('elementAttributes');
-        let debug = this.model.get("_debugPrint");
-        if (debug) { console.log(this.el, "Element Properties:", attrs); }
-        for (let prop in attrs) {
-            let val = attrs[prop] as string|object;
-            if (val === "") {
-                this.el.removeAttribute(prop);
-            }  else if (typeof val === 'string') {
-                this.el.setAttribute(prop, val);
-            } else if (val instanceof WidgetView) {
-                let setter = this._modelHTMLSetter(prop, val);
-                val.model.on("changed", setter, val);
-                setter();
-            } else if (val instanceof WidgetModel) {
-                this.create_child_view(val).then((view: DOMWidgetView) => {
-                    let setter = this._modelHTMLSetter(prop, view);
-                    view.model.on("changed", setter, view);
-                    setter();
-                }).catch(reject('Could not add child view to HTMLElement', true));
-            } else {
-                this.el.setAttribute(prop, val.toString() + Object.keys(val).toString());
-            }
-
+    _attachWidgetAsAttr(prop:string, val:WidgetView):Promise<any> {
+        let setter = this._modelHTMLSetter(prop, val);
+        val.model.on("change", setter, val);
+        let r = val.render();
+        if (r !== undefined) {
+            return r.then(() => {
+                if (val.hasOwnProperty('renderChildren')) {
+                    //@ts-ignore
+                    return val.renderChildren().then(setter)
+                } else {
+                    return setter();
+                }
+            })
+        } else if (val.hasOwnProperty('renderChildren')) {
+            //@ts-ignore
+            return val.renderChildren().then(setter)
+        } else {
+            return setter();
         }
     }
-    updateValue() {
+    _updateAttribute(prop:string, attrs:Record<string, any>):Promise<any> {
+        let val = attrs[prop] as string|object;
+        if (val === "") {
+            if (this.el.hasAttribute(prop)) {
+                this.el.removeAttribute(prop);
+                return this.notifyAttrUpdate(prop);
+            }
+        }  else if (typeof val === 'string') {
+            let cur = this.el.getAttribute(prop);
+            if (cur !== val) {
+                this.el.setAttribute(prop, val);
+                return this.notifyAttrUpdate(prop);
+            }
+        } else if (val instanceof WidgetView) {
+            return this._attachWidgetAsAttr(prop, val);
+        } else if (val instanceof WidgetModel) {
+            return this.create_child_view(val).then((view: DOMWidgetView) => {
+                return this._attachWidgetAsAttr(prop, view);
+            }).catch(reject('Could not add child view to HTMLElement', true));
+        } else {
+            this.el.setAttribute(prop, val.toString() + Object.keys(val).toString());
+            return this.notifyAttrUpdate(prop);
+        }
+        return ActiveHTMLView._defaultPromise();
+    }
+
+    static async _each(arr: Iterable<any>, fn: (item: any) => any): Promise<any> {
+        for (const item of arr) await fn(item)
+    }
+    static _defaultPromise(val = null) {
+        return new Promise((resolve) => { resolve(val); });
+    }
+    updateAttributes():Promise<any> {
+        let attrs = this.model.get('elementAttributes') as Record<string, any>;
+        let debug = this.model.get("_debugPrint");
+        if (debug) { console.log(this.el, "Element Properties:", attrs); }
+        return ActiveHTMLView._each(Object.keys(attrs), (prop:string)=>this._updateAttribute(prop, attrs))
+    }
+    notifyAttrUpdate(prop:string):Promise<any> {
+        let key = "view-change:"+prop;
+        let onevents = this.model.get('onevents') as Record<string, object>;
+        if (onevents.hasOwnProperty('remove')) {
+            if (this.model.get('_debugPrint')) {
+                console.log('notifying attr change:', key)
+            }
+            let props = onevents[key];
+            this.handleEvent(this.dummyEvent(key), key, props);
+            // }
+        }
+        return ActiveHTMLView._defaultPromise();
+    }
+    updateValue():Promise<any> {
         let el = this.el as HTMLInputElement;
         let debug = this.model.get("_debugPrint");
         if (el !== undefined) {
@@ -439,10 +569,10 @@ export class ActiveHTMLView extends DOMWidgetView {
                 if (checked !== undefined) {
                     let newVal = this.model.get('value');
                     let checkVal = newVal.length > 0 && newVal != "false" && newVal != "0";
-                    if (debug) {
-                        console.log('updating checked', checked, "->", checkVal);
-                    }
                     if (checkVal !== checked) {
+                        if (debug) {
+                            console.log(this.el, 'updating checked', checked, "->", checkVal);
+                        }
                         el.checked = checkVal;
                     }
                 }
@@ -458,10 +588,10 @@ export class ActiveHTMLView extends DOMWidgetView {
                     let newValStr = this.model.get('value');
                     if (typeof newValStr === 'string') {
                         let testVal = val.join('&&');
-                        if (debug) {
-                            console.log('updating selection', testVal, "->", newValStr);
-                        }
                         if (newValStr !== testVal) {
+                            if (debug) {
+                                console.log(this.el, 'updating selection', testVal, "->", newValStr);
+                            }
                             let splitVals = newValStr.split("&&");
                             for(let i = 0; i < el.options.length; i++) {
                                 let o = el.options[i];
@@ -474,131 +604,188 @@ export class ActiveHTMLView extends DOMWidgetView {
                 let val = el.value;
                 if (val !== undefined) {
                     let newVal = this.model.get('value');
-                    if (debug) {
-                        console.log('updating value', val, "->", newVal);
-                    }
                     if (newVal !== val) {
+                        if (debug) {
+                            console.log(this.el, 'updating value', val, "->", newVal);
+                        }
                         el.value = newVal;
                     }
                 }
             }
         }
+        return ActiveHTMLView._defaultPromise();
     }
 
     _currentEvents: Record<string, any>;
-    setEvents() {
+    _registerEvent(key:string, listeners:Record<string, object>):void {
+        if (!this._currentEvents.hasOwnProperty(key)) {
+            this._currentEvents[key] = [
+                listeners[key],
+                this.constructEventListener(key, listeners[key])
+            ];
+            this.el.addEventListener(key, this._currentEvents[key][1]);
+        } else if (this._currentEvents[key][0] !== listeners[key]) {
+            this.el.removeEventListener(key, this._currentEvents[key][1]);
+            this._currentEvents[key] = [
+                listeners[key],
+                this.constructEventListener(key, listeners[key])
+            ];
+            this.el.addEventListener(key, this._currentEvents[key][1]);
+        }
+    }
+    setEvents():Promise<any> {
         let listeners = this.model.get('eventPropertiesDict') as Record<string, string[]>;
         let debug = this.model.get("_debugPrint");
         if (debug) { console.log(this.el, "Adding Events:", listeners); }
-        for (let key in listeners) {
-            if (listeners.hasOwnProperty(key)) {
-                if (!this._currentEvents.hasOwnProperty(key)) {
-                    this._currentEvents[key] = [
-                        listeners[key],
-                        this.constructEventListener(key, listeners[key])
-                    ];
-                    this.el.addEventListener(key, this._currentEvents[key][1]);
-                } else if (this._currentEvents[key][0] !== listeners[key]) {
-                    this.el.removeEventListener(key, this._currentEvents[key][1]);
-                    this._currentEvents[key] = [
-                        listeners[key],
-                        this.constructEventListener(key, listeners[key])
-                    ];
-                    this.el.addEventListener(key, this._currentEvents[key][1]);
+        return ActiveHTMLView._each(
+            Object.keys(listeners),
+            (key)=> {
+                if (listeners.hasOwnProperty(key)) {
+                    this._registerEvent(key, listeners);
                 }
             }
-        }
+            )
     }
-    removeEvents(): void {
+    removeEvents():Promise<any> {
         let newListeners = this.model.get('eventPropertiesDict') as Record<string, string[]>;
         let current = this._currentEvents;
         let debug = this.model.get("_debugPrint");
-        for (let prop in current) {
-            if (current.hasOwnProperty(prop)) {
-                if (!newListeners.hasOwnProperty(prop)) {
-                    if (debug) { console.log(this.el, "Removing Event:", prop); }
-                    this.el.removeEventListener(prop, this._currentEvents[prop][1]);
-                    this._currentEvents.delete(prop);
+        return ActiveHTMLView._each(
+            Object.keys(current),
+            (prop) => {
+                if (current.hasOwnProperty(prop)) {
+                    if (!newListeners.hasOwnProperty(prop)) {
+                        if (debug) {
+                            console.log(this.el, "Removing Event:", prop);
+                        }
+                        this.el.removeEventListener(prop, this._currentEvents[prop][1]);
+                        this._currentEvents.delete(prop);
+                    }
                 }
             }
-        }
+        )
     }
-    updateEvents(): void {
-        this.setEvents();
-        this.removeEvents();
+    updateEvents():Promise<any> {
+        return this.setEvents().then(
+            ()=>this.removeEvents
+        )
     }
 
     _currentOnHandlers: Record<string, any>;
-    setOnHandlers() {
+    _registerOnHandler(key:string, listeners:Record<string, object>):void {
+        if (!this._currentOnHandlers.hasOwnProperty(key)) {
+            this._currentOnHandlers[key] = [
+                listeners[key],
+                this.constructOnHandler(key, listeners[key])
+            ];
+            this.model.on(key, this._currentOnHandlers[key][1], this);
+        } else if (this._currentOnHandlers[key][0] !== listeners[key]) {
+            this.model.off(key, this._currentOnHandlers[key][1], this);
+            this._currentOnHandlers[key] = [
+                listeners[key],
+                this.constructOnHandler(key, listeners[key])
+            ];
+            this.model.on(key, this._currentOnHandlers[key][1], this);
+        }
+    }
+    setOnHandlers():Promise<any> {
         let listeners = this.model.get('onevents') as Record<string, object>;
         let debug = this.model.get("_debugPrint");
         if (debug) { console.log(this.el, "Adding On Handlers:", listeners); }
-        for (let key in listeners) {
-            if (listeners.hasOwnProperty(key)) {
-                if (!this._currentOnHandlers.hasOwnProperty(key)) {
-                    this._currentOnHandlers[key] = [
-                        listeners[key],
-                        this.constructOnHandler(key, listeners[key])
-                    ];
-                    this.model.on(key, this._currentOnHandlers[key][1], this);
-                } else if (this._currentOnHandlers[key][0] !== listeners[key]) {
-                    this.model.off(key, this._currentOnHandlers[key][1], this);
-                    this._currentOnHandlers[key] = [
-                        listeners[key],
-                        this.constructEventListener(key, listeners[key])
-                    ];
-                    this.model.on(key, this._currentOnHandlers[key][1], this);
+        return ActiveHTMLView._each(
+            Object.keys(listeners),
+            (key)=> {
+                if (listeners.hasOwnProperty(key)) {
+                    return this._registerOnHandler(key, listeners);
                 }
             }
-        }
+        )
     }
-    removeOnHandlers(): void {
+    removeOnHandlers(): Promise<any> {
         let newListeners = this.model.get('onevents') as Record<string, string[]>;
         let current = this._currentOnHandlers;
         let debug = this.model.get("_debugPrint");
-        for (let prop in current) {
-            if (current.hasOwnProperty(prop)) {
-                if (!newListeners.hasOwnProperty(prop)) {
-                    if (debug) { console.log(this.el, "Removing On Handler:", prop); }
-                    this.model.off(prop, current[prop][1], this);
-                    current.delete(prop);
+        return ActiveHTMLView._each(
+            Object.keys(current),
+            (prop) => {
+                if (current.hasOwnProperty(prop)) {
+                    if (!newListeners.hasOwnProperty(prop)) {
+                        if (debug) {
+                            console.log(this.el, "Removing On Handler:", prop);
+                        }
+                        this.model.off(prop, current[prop][1], this);
+                        current.delete(prop);
+                    }
                 }
             }
-        }
+        )
     }
-    updateOnHandlers(): void {
-        this.setOnHandlers();
-        this.removeOnHandlers();
+    updateOnHandlers():Promise<any> {
+        return this.setOnHandlers().then(
+            ()=>this.removeOnHandlers
+        )
     }
 
     _initted: boolean;
-    render() {
-        super.render();
-        this.el.classList.remove('lm-Widget', 'p-Widget')
-        this.update();
+    _calloninit():void {
         if (!this._initted) {
             let onevents = this.model.get('onevents') as Record<string, object>;
             if (onevents.hasOwnProperty('initialize')) {
                 let oninit = onevents['initialize'];
                 if (Object.keys(oninit).length > 0) {
-                    this.handleEvent(new Event('fake', {}), 'oninitialize', oninit);
+                    this.handleEvent(this.dummyEvent('initialize'), 'initialize', oninit);
                 }
             }
         }
         this._initted = true;
     }
-    update(): void {
-        this.updateBody();
-        // this.updateTextContent();
-        this.updateAttribute('id');
-        this.updateAttributes();
-        this.updateClassList();
-        this.setStyles();
-        this.setEvents();
-        this.setOnHandlers();
-        this.updateValue();
-        // this.el.classList = this.model.get("classList");
+    render(): Promise<any> {
+        let r = super.render();
+        if (r !== undefined) {
+            return r.then(
+                (v: WidgetView) => {
+                    this.el.classList.remove('lm-Widget', 'p-Widget')
+                    return this.update().then(() => this._calloninit)
+                }
+            )
+        } else {
+             this.el.classList.remove('lm-Widget', 'p-Widget');
+             return this.update().then((v) => {this._calloninit(); return v});
+        }
     }
+    renderChildren(): Promise<any> {
+        if (this.children_views !== null) {
+            return this.children_views.update([]).then(
+                (views) => ActiveHTMLView._each(
+                    views,
+                    (v: WidgetView) => {
+                        if (v.hasOwnProperty('renderChildren')) {
+                            //@ts-ignore
+                            return v.renderChildren();
+                        } else {
+                            v.render();
+                        }
+                    }
+                )
+            )
+        } else {
+            return ActiveHTMLView._defaultPromise();
+        }
+    }
+
+    update(): Promise<any> {
+        return this.updateAttribute('id').then(
+            () => this.updateClassList().then(
+            () => this.setStyles().then(
+            () => this.updateBody().then(
+            () => this.updateAttributes().then(
+            () => this.setEvents().then(
+            () => this.setOnHandlers().then(
+            () => this.updateValue().then(
+            () => {return this;}
+            ))))))))
+        }
+
 
     // @ts-ignore
     get tagName() {
@@ -678,6 +865,10 @@ export class ActiveHTMLView extends DOMWidgetView {
         this.model.set('exportData', data, {updated_view:this});
         this.touch()
     }
+    getData(key:string, value:any) {
+        let data = this.model.get('exportData') as Record<string, any>;
+        return data[key];
+    }
     static handlerContext = {
         'bootstrap': bootstrap,
         "$": $,
@@ -731,6 +922,13 @@ export class ActiveHTMLView extends DOMWidgetView {
         let fn = this.model.get('_ihandlers')[method][1] as ((event:Event, widget:WidgetView, context:object) => void);
         fn.call(this, event, this, ActiveHTMLView.handlerContext);
     }
+    dummyEvent(name:string):Event {
+        return {
+            target:this.el,
+            type:name,
+            stopPropagation: function (){}
+        } as unknown as Event; // a hack only so we can use the same interface for custom events
+    }
     constructEventListener(eventName:string, propData:object|string[]|string) {
         let parent = this;
         return function (e:Event) {
@@ -739,8 +937,9 @@ export class ActiveHTMLView extends DOMWidgetView {
     }
     constructOnHandler(eventName:string, propData:object|string[]|string) {
         let listener = this.constructEventListener(eventName, propData);
+        let event = this.dummyEvent(eventName);
         return function () {
-            return listener(new Event(eventName, {}));
+            return listener(event);
         }
     }
     constructEventMessage(e: Event, props?:string[], eventName?:string) {

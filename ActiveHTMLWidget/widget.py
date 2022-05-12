@@ -108,3 +108,10 @@ class HTMLElement(DOMWidget):
         from IPython.core.display import HTML
         if copied:
             return HTML("<h4>Extension installed. You will need to reload the page to get the widgets to display.</h1>")
+
+    def trigger(self, method, content=None, buffers=None):
+        if content is None:
+            content = {}
+        content = content.copy()
+        content['handle'] = method
+        return self._send({"method": "call", "content": content}, buffers=buffers)
