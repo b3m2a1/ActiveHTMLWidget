@@ -108,7 +108,42 @@ class HTMLElement(DOMWidget):
 
         from IPython.core.display import HTML
         if copied:
-            return HTML("<h4>Extension installed. You will need to reload the page to get the widgets to display.</h1>")
+            return HTML("<h4>Extension installed to {}. You will need to reload the page to get the widgets to display.</h1>".format(target))
+    @classmethod
+    def jupyternb_install(self, overwrite=False):
+        """
+        Attempts to do a basic installation for JupterLab
+        :return:
+        :rtype:
+        """
+        import sys, shutil, os, tempfile as tf
+
+        prefix = sys.exec_prefix
+        pkg_root = os.path.dirname(os.path.abspath(self._here))
+        pkg_name = os.path.basename(pkg_root)
+        src = os.path.join(pkg_root, 'nbextension')
+        target = os.path.join(prefix, "share", "jupyter", "nbextensions", pkg_name)
+        copied = False
+        if overwrite or not os.path.isdir(target):
+            copied = True
+            if os.path.exists(target):
+                with tf.TemporaryDirectory() as new_loc:
+                    try:
+                        os.remove(new_loc)
+                    except:
+                        pass
+                os.rename(target, new_loc)
+            else:
+                new_loc = None
+            try:
+                shutil.copytree(src, target)
+            except:
+                if new_loc is not None:
+                   os.rename(new_loc, target)
+
+        from IPython.core.display import HTML
+        if copied:
+            return HTML("<h4>Extension installed to {}. You will need to reload the page to get the widgets to display.</h1>".format(target))
 
     def trigger(self, event, content=None, buffers=None):
         if content is None:

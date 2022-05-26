@@ -13,4 +13,6 @@
   document.querySelector('body')!.getAttribute('data-base-url') +
   'nbextensions/ActiveHTMLWidget';
 
+import '../css/index.css';
+import '../css/reset.css';
 export * from './index';
