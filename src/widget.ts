@@ -76,11 +76,22 @@ export class ActiveHTMLModel extends DOMWidgetModel {
     // constructor() {
     //     super();
     // }
+    _is_ready=false;
     initialize(attributes: any, options: { model_id: string; comm?: any; widget_manager: any }) {
         super.initialize(attributes, options);
         // this._ihandlers= {};
-        this._updateHandlers();
-        this.on('change:jsHandlers', this._updateHandlers, this);
+        this.ready()
+    }
+    ready():Promise<ActiveHTMLModel> {
+        if (!this._is_ready) {
+            return this._updateHandlers().then(()=> {
+                this.on('change:jsHandlers', this._updateHandlers, this);
+                this._is_ready = true;
+                return this
+            })
+        } else {
+            return Promise.resolve(this)
+        }
     }
 
     defaults() {
@@ -160,12 +171,11 @@ export class ActiveHTMLModel extends DOMWidgetModel {
           }
           return hash;
     }
-    _updateHandlers(): void {
-        let handlers = this.get('jsHandlers') as Record<string, string>;
-        let debug = this.get('_debugPrint');
+    _setHandlers(handlers:Record<string, string>) {
         let _ihandlers = this.get('_ihandlers');
+        let debug = this.get('_debugPrint');
         for (let h in handlers) {
-            if (handlers.hasOwnProperty(h)) {
+            if (h!="src"&&handlers.hasOwnProperty(h)) {
                 let hash = this._stringHash(handlers[h]);
                 if (
                     (!_ihandlers.hasOwnProperty(h)) ||
@@ -177,6 +187,52 @@ export class ActiveHTMLModel extends DOMWidgetModel {
                     _ihandlers[h] = [hash, this._defineHandler(h, handlers[h])];
                 }
             }
+        }
+    }
+    _apiMod:string|null = null;
+    static _needsAPILoad(curMod:string|null, handlers:Record<string, any>, _ihandlers:Record<string, any> ):boolean {
+        return (
+            handlers.hasOwnProperty("src") &&
+            curMod !== handlers["src"] &&
+            (!_ihandlers.hasOwnProperty("src")||_ihandlers["src"]!=handlers["src"])
+            )
+    }
+    _apiLoader:Promise<Record<string, any>>|null = null;
+    _updateHandlers(): Promise<Record<string, any>> {
+        let handlers = this.get('jsHandlers') as Record<string, string>;
+        let debug = this.get('_debugPrint');
+        let _ihandlers = this.get('_ihandlers') as Record<string, any>;
+        let imp = null;
+        if (ActiveHTMLModel._needsAPILoad(this._apiMod, handlers, _ihandlers)) {
+            if (debug) {
+                console.log('loading API from source', handlers["src"]);
+            }
+            // Ugly TypeScript hack to keep the dynamic import semantics we need
+            // for reliable loading
+            imp = eval("import(\"" + handlers["src"] + "\")");
+        }
+        if (imp !== null) {
+            this._apiLoader = imp.then(
+                (mod: Record<string, any>) => {
+                    for (let m in mod) {
+                        if (mod[m] instanceof Function) {
+                            _ihandlers[m] = [null, mod[m]];
+                        }
+                    }
+                    this._apiMod = handlers["src"];
+                    _ihandlers["src"] = handlers["src"];
+                }
+            ).then(() => {
+                this._setHandlers(handlers);
+                this._apiLoader = null;
+                return _ihandlers
+            })
+        }
+        if (this._apiLoader !== null && typeof this._apiLoader !== "undefined") {
+            return this._apiLoader as Promise<Record<string, any>>;
+        } else {
+            this._setHandlers(handlers)
+            return Promise.resolve(_ihandlers)
         }
     }
 
@@ -209,27 +265,40 @@ export class ActiveHTMLModel extends DOMWidgetModel {
             ...ops
         } as unknown as Event; // a hack only so we can use the same interface for custom events
     }
-    callHandler(method:string, event:Event) {
-        let handlers = this.get('_ihandlers') as Record<string, any>;
-        let fn: ((event:Event, widget:WidgetModel, context:object) => void)|null = null;
+    callHandler(method:string, event:Event): Promise<any> {
+        return ActiveHTMLModel.callModelHandler(method, event, this, this);
+    }
+    static callModelHandler(method: string, event: Event, model:WidgetModel, target:any): Promise<any> {
+        let handlers = model.get('_ihandlers') as Record<string, any>;
+        let fn: ((event:Event, widget:WidgetModel, context:object) => any)|null = null;
+
         if (handlers.hasOwnProperty(method)) {
             fn = handlers[method][1];
+            if (fn !== null) {
+                let val = fn.call(target, event, target, ActiveHTMLView.handlerContext);
+                return Promise.resolve(val);
+            } else {
+                throw new Error("handler " + method + " is null");
+            }
         } else {
-            let api = this.get('jsAPI');
+            let api = model.get('jsAPI') as ActiveHTMLModel|null;
             if (api !== null) {
-                handlers = api.get("_ihandlers");
-                if (handlers.hasOwnProperty(method)) {
-                    fn = handlers[method][1];
-                }
+                return api.ready().then((api) => {
+                    handlers = api.get('_ihandlers') as Record<string, any>
+                    if (handlers.hasOwnProperty(method)) {
+                        fn = handlers[method][1];
+                    }
+                    if (fn !== null) {
+                        return fn.call(target, event, target, ActiveHTMLView.handlerContext);
+                    }  else {
+                        throw new Error("couldn't find API method " + method);
+                    }
+                })
+            } else {
+                throw new Error("couldn't find handler or API method " + method);
             }
         }
-        if (fn !== null) {
-            fn.call(this, event, this, ActiveHTMLView.handlerContext);
-        } else {
-            throw new Error("couldn't find handler " + method);
-        }
     }
-
 }
 
 export class ActiveHTMLView extends DOMWidgetView {
@@ -699,7 +768,7 @@ export class ActiveHTMLView extends DOMWidgetView {
     }
     updateEvents():Promise<any> {
         return this.setEvents().then(
-            ()=>this.removeEvents
+            ()=>this.removeEvents()
         )
     }
 
@@ -754,7 +823,7 @@ export class ActiveHTMLView extends DOMWidgetView {
     }
     updateOnHandlers():Promise<any> {
         return this.setOnHandlers().then(
-            ()=>this.removeOnHandlers
+            ()=>this.removeOnHandlers()
         )
     }
 
@@ -950,25 +1019,8 @@ export class ActiveHTMLView extends DOMWidgetView {
             this.sendEventMessage(e, this.constructEventMessage(e, props, eventName));
         }
     }
-    callHandler(method:string, event:Event) {
-        let handlers = this.model.get('_ihandlers') as Record<string, any>;
-        let fn: ((event:Event, widget:WidgetView, context:object) => void)|null = null;
-        if (handlers.hasOwnProperty(method)) {
-            fn = handlers[method][1];
-        } else {
-            let api = this.model.get('jsAPI');
-            if (api !== null) {
-                handlers = api.get("_ihandlers");
-                if (handlers.hasOwnProperty(method)) {
-                    fn = handlers[method][1];
-                }
-            }
-        }
-        if (fn !== null) {
-            fn.call(this, event, this, ActiveHTMLView.handlerContext);
-        } else {
-            throw new Error("couldn't find handler " + method);
-        }
+    callHandler(method:string, event:Event):Promise<any> {
+        return ActiveHTMLModel.callModelHandler(method, event, this.model, this);
     }
     dummyEvent(name:string, ops:object={}):Event {
         return {
