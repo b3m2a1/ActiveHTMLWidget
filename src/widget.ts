@@ -759,8 +759,8 @@ export class ActiveHTMLView extends DOMWidgetView {
                         if (debug) {
                             console.log(this.el, "Removing Event:", prop);
                         }
-                        this.el.removeEventListener(prop, this._currentEvents[prop][1]);
-                        this._currentEvents.delete(prop);
+                        this.el.removeEventListener(prop, current[prop][1]);
+                        delete current[prop];
                     }
                 }
             }
@@ -815,7 +815,7 @@ export class ActiveHTMLView extends DOMWidgetView {
                             console.log(this.el, "Removing On Handler:", prop);
                         }
                         this.model.off(prop, current[prop][1], this);
-                        current.delete(prop);
+                        delete current[prop];
                     }
                 }
             }
