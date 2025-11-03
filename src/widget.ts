@@ -56,7 +56,13 @@ class LayoutManagerWidget extends Widget {
     }
     processMessage(msg: Message) {
         super.processMessage(msg);
-        this._view.processPhosphorMessage(msg);
+        try {
+            //@ts-ignore
+            this._view.processPhosphorMessage(msg);
+        } catch {
+            //@ts-ignore
+            this._view.processLuminoMessage(msg);
+        }
     }
     get widgets(): ReadonlyArray<Widget> {
         return (this.layout as PanelLayout).widgets;
@@ -111,6 +117,7 @@ export class ActiveHTMLModel extends DOMWidgetModel {
             _bodyType: "",
             _debugPrint:false,
             styleDict: {},
+            unsyncedProperties: [],
             elementAttributes: {},
             id: "",
             value: "",
@@ -351,6 +358,7 @@ export class ActiveHTMLView extends DOMWidgetView {
     setStyle(style: WidgetModel, oldStyle?: WidgetModel) {} // null override
     setStyles(): Promise<any> {
         let elementStyles = this.model.get("styleDict") as Record<string, string>;
+        let unsyncedProperties = this.model.get("unsyncedProperties");
         let keys = Object.keys(elementStyles);
         if (keys.length === 0) {
             this._currentStyles.clear();
@@ -363,7 +371,7 @@ export class ActiveHTMLView extends DOMWidgetView {
             return ActiveHTMLView._each(
                 keys,
                 (prop:string) => {
-                    if (elementStyles.hasOwnProperty(prop)) {
+                    if (elementStyles.hasOwnProperty(prop) && !unsyncedProperties.includes(prop)) {
                         // console.log(">>>", prop, elementStyles[prop], typeof prop);
                         this.el.style.setProperty(prop, elementStyles[prop]);
                         // console.log("<<<", prop, this.el.style.getPropertyValue(prop));
@@ -375,7 +383,7 @@ export class ActiveHTMLView extends DOMWidgetView {
     }
     updateStyles(): Promise<any> {
         return this.setStyles().then(
-            ()=>this.removeStyles
+            ()=>this.removeStyles()
         )
     }
 
@@ -642,9 +650,12 @@ export class ActiveHTMLView extends DOMWidgetView {
     }
     updateAttributes():Promise<any> {
         let attrs = this.model.get('elementAttributes') as Record<string, any>;
+        let unsyncedProperties = this.model.get('unsyncedProperties');
         let debug = this.model.get("_debugPrint");
         if (debug) { console.log(this.el, "Element Properties:", attrs); }
-        return ActiveHTMLView._each(Object.keys(attrs), (prop:string)=>this._updateAttribute(prop, attrs))
+        return ActiveHTMLView._each(Object.keys(attrs),
+            (prop:string)=>(!unsyncedProperties.includes(prop) && this._updateAttribute(prop, attrs))
+        )
     }
     notifyAttrUpdate(prop:string):Promise<any> {
         let key = "view-change:"+prop;

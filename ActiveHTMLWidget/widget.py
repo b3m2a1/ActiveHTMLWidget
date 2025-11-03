@@ -20,6 +20,7 @@ class HTMLElement(DOMWidget):
     tagName = Unicode('div').tag(sync=True)
     classList = List().tag(sync=True)
     styleDict = Dict().tag(sync=True)
+    unsyncedProps = List().tag(sync=True)
     elementAttributes = Dict().tag(sync=True, **widget_serialization)
     innerHTML = Unicode('').tag(sync=True)
     textContent = Unicode('').tag(sync=True)
@@ -75,7 +76,7 @@ class HTMLElement(DOMWidget):
 
     _here = __file__
     @classmethod
-    def jupyterlab_install(self, overwrite=False):
+    def jupyterlab_install(self, exec_prefix=None, overwrite=False):
         """
         Attempts to do a basic installation for JupterLab
         :return:
@@ -83,7 +84,7 @@ class HTMLElement(DOMWidget):
         """
         import sys, shutil, os, tempfile as tf
 
-        prefix = sys.exec_prefix
+        prefix = sys.exec_prefix if exec_prefix is None else exec_prefix
         pkg_root = os.path.dirname(os.path.abspath(self._here))
         pkg_name = os.path.basename(pkg_root)
         src = os.path.join(pkg_root, 'labextension')
@@ -110,7 +111,7 @@ class HTMLElement(DOMWidget):
         if copied:
             return HTML("<h4>Extension installed to {}. You will need to reload the page to get the widgets to display.</h1>".format(target))
     @classmethod
-    def jupyternb_install(self, overwrite=False):
+    def jupyternb_install(self, exec_prefix=None, overwrite=False):
         """
         Attempts to do a basic installation for JupterLab
         :return:
@@ -118,7 +119,7 @@ class HTMLElement(DOMWidget):
         """
         import sys, shutil, os, tempfile as tf
 
-        prefix = sys.exec_prefix
+        prefix = sys.exec_prefix if exec_prefix is None else exec_prefix
         pkg_root = os.path.dirname(os.path.abspath(self._here))
         pkg_name = os.path.basename(pkg_root)
         src = os.path.join(pkg_root, 'nbextension')
