@@ -1,4 +1,4 @@
-from ActiveHTMLWidget.widget import HTMLElement
+from ..widget import HTMLElement
 
 
 def test_element_creation_blank():

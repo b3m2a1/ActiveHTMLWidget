@@ -2,7 +2,7 @@ import gc
 import weakref
 import pytest
 from traitlets import TraitError
-from ActiveHTMLWidget.widget import HTMLElement
+from ..widget import HTMLElement
 
 
 def test_callbacks_are_released_on_close():
