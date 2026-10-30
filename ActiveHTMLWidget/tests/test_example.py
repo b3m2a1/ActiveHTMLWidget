@@ -1,14 +1,7 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# Copyright (c) b3m2a1.
-# Distributed under the terms of the Modified BSD License.
-
-import pytest
-
-from ..example import ExampleWidget
+from ActiveHTMLWidget.widget import HTMLElement
 
 
-def test_example_creation_blank():
-    w = ExampleWidget()
-    assert w.value == 'Hello World'
+def test_element_creation_blank():
+    widget=HTMLElement()
+    assert widget.value=='' and widget.tagName=='div'
+    widget.close()

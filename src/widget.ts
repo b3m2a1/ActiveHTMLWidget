@@ -3,7 +3,6 @@
 
 import {
     unpack_models,
-    reject,
     DOMWidgetModel,
     DOMWidgetView,
     WidgetModel,
@@ -36,10 +35,8 @@ namespace PatchedPhosphorWidget {
 
 class LayoutManagerWidget extends Widget {
     constructor(options: Widget.IOptions & PatchedPhosphorWidget.IOptions) {
-        let view = options.view;
-        //@ts-ignore
-        options.tag = view.tagName;
-        super(options);
+        const view = options.view;
+        super({...options, tag: view.tagName} as Widget.IOptions);
         this._view = view;
         this.layout = new PanelLayout({fitPolicy:'set-no-constraint'});
     }
@@ -47,22 +44,16 @@ class LayoutManagerWidget extends Widget {
         if (this.isDisposed) {
             return;
         }
-        super.dispose();
-        if (this._view) {
-            this._view.remove();
-        }
-        //@ts-ignore
+        const view = this._view;
         this._view = null;
+        super.dispose();
+        if (view) view.remove();
     }
     processMessage(msg: Message) {
         super.processMessage(msg);
-        try {
-            //@ts-ignore
-            this._view.processPhosphorMessage(msg);
-        } catch {
-            //@ts-ignore
-            this._view.processLuminoMessage(msg);
-        }
+        if (!this._view) return;
+        if (typeof (this._view as any).processLuminoMessage === 'function') (this._view as any).processLuminoMessage(msg);
+        else (this._view as any).processPhosphorMessage(msg);
     }
     get widgets(): ReadonlyArray<Widget> {
         return (this.layout as PanelLayout).widgets;
@@ -73,7 +64,7 @@ class LayoutManagerWidget extends Widget {
     insertWidget(index: number, widget: Widget): void {
         (this.layout as PanelLayout).insertWidget(index, widget);
     }
-    private _view: DOMWidgetView;
+    private _view: DOMWidgetView | null;
 }
 
 export class ActiveHTMLModel extends DOMWidgetModel {
@@ -82,22 +73,61 @@ export class ActiveHTMLModel extends DOMWidgetModel {
     // constructor() {
     //     super();
     // }
-    _is_ready=false;
+    _is_ready: boolean;
+    _readyPromise: Promise<ActiveHTMLModel> | null;
+    _handlerVersion: number;
+    _activeHTMLClosed: boolean;
+    _moduleHandlers: Record<string, any>;
+    _moduleLoads: Map<string, Promise<Record<string, any>>>;
     initialize(attributes: any, options: { model_id: string; comm?: any; widget_manager: any }) {
         super.initialize(attributes, options);
-        // this._ihandlers= {};
-        this.ready()
+        this._is_ready = false;
+        this._readyPromise = null;
+        this._handlerVersion = 0;
+        this._activeHTMLClosed = false;
+        this._moduleHandlers = Object.create(null);
+        this._moduleLoads = new Map();
+        this._apiLoader = null;
+        this._apiMod = null;
+        this.listenTo(this, 'change:jsHandlers', () => {
+            this._updateHandlers().catch(error => this.trigger('handler:error', error));
+        });
+        this.ready().catch(error => this.trigger('handler:error', error));
     }
-    ready():Promise<ActiveHTMLModel> {
-        if (!this._is_ready) {
-            return this._updateHandlers().then(()=> {
-                this.on('change:jsHandlers', this._updateHandlers, this);
+    ready(): Promise<ActiveHTMLModel> {
+        if (this._activeHTMLClosed) return Promise.reject(new Error('Widget model is closed'));
+        if (this._apiLoader) return this._apiLoader.then(() => this);
+        if (this._is_ready) return Promise.resolve(this);
+        if (!this._readyPromise) {
+            this._readyPromise = this._updateHandlers().then(() => {
                 this._is_ready = true;
-                return this
-            })
-        } else {
-            return Promise.resolve(this)
+                return this;
+            });
         }
+        return this._readyPromise;
+    }
+    _closePromise: Promise<void> | null;
+    close(comm_closed = false): Promise<void> {
+        if (this._activeHTMLClosed) return this._closePromise || Promise.resolve();
+        this._activeHTMLClosed = true;
+        this._handlerVersion++;
+        this.stopListening();
+        this._moduleLoads.clear();
+        this._apiLoader = null;
+        this._readyPromise = null;
+        const views = Object.values(this.views || {});
+        const closing = super.close(comm_closed).then(async () => {
+            await Promise.all(views.map(async pending => {
+                const view = await pending as ActiveHTMLView;
+                await view._removalPromise;
+            }));
+        });
+        const clear = () => {
+            this._moduleHandlers = Object.create(null);
+            this.set('_ihandlers', Object.create(null), {silent: true});
+        };
+        this._closePromise = closing.then(clear, error => { clear(); throw error; });
+        return this._closePromise;
     }
 
     defaults() {
@@ -118,6 +148,10 @@ export class ActiveHTMLModel extends DOMWidgetModel {
             _debugPrint:false,
             styleDict: {},
             unsyncedProperties: [],
+            eventTargetMode: 'compact',
+            eventTargetFields: ['id', 'name', 'type', 'value', 'checked'],
+            eventThrottleMs: 0,
+            coalescedEvents: ['pointermove', 'mousemove', 'input', 'wheel'],
             elementAttributes: {},
             id: "",
             value: "",
@@ -126,10 +160,10 @@ export class ActiveHTMLModel extends DOMWidgetModel {
             eventPropertiesDict: {},
             defaultEventProperties: [
                 "bubbles", "cancelable", "composed",
-                "target", "timestamp", "type",
+                "target", "timeStamp", "type",
                 "key", "repeat",
                 "button", "buttons",
-                "alKey", "shiftKey", "ctrlKey", "metaKey"
+                "altKey", "shiftKey", "ctrlKey", "metaKey"
             ],
             jsHandlers: {},
             jsAPI: null,
@@ -159,88 +193,65 @@ export class ActiveHTMLModel extends DOMWidgetModel {
     static view_module = MODULE_NAME; // Set to null if no view
     static view_module_version = MODULE_VERSION;
 
-    _defineHandler(name:string, body:string) {
-        // adapted from SO to define a named handler
-        let lines = ['return function ' + name + '(event, widget, context) {' ];
-        lines.push('\"use strict\";');
-        lines.push(body);
-        lines.push("}")
-        return new Function(lines.join("\n"))();
+    _defineHandler(name: string, body: string) {
+        // Names are metadata, not interpolated executable source.
+        const fn = new Function('event', 'widget', 'context', '\"use strict\";\n' + body);
+        Object.defineProperty(fn, 'name', {value: name, configurable: true});
+        return fn;
     }
-    _stringHash(str:string):number {
-          // just needed a simple one so: https://stackoverflow.com/questions/7616461/generate-a-hash-from-string-in-javascript
-          var hash = 0, i, chr;
-          if (str.length === 0) return hash;
-          for (i = 0; i < str.length; i++) {
-            chr   = str.charCodeAt(i);
-            hash  = ((hash << 5) - hash) + chr;
-            hash |= 0; // Convert to 32bit integer
-          }
-          return hash;
-    }
-    _setHandlers(handlers:Record<string, string>) {
-        let _ihandlers = this.get('_ihandlers');
-        let debug = this.get('_debugPrint');
-        for (let h in handlers) {
-            if (h!="src"&&handlers.hasOwnProperty(h)) {
-                let hash = this._stringHash(handlers[h]);
-                if (
-                    (!_ihandlers.hasOwnProperty(h)) ||
-                    (_ihandlers[h][0] !== hash)
-                ) {
-                    if (debug) {
-                        console.log('adding handler', h)
-                    }
-                    _ihandlers[h] = [hash, this._defineHandler(h, handlers[h])];
-                }
-            }
+    _setHandlers(handlers: Record<string, string>) {
+        const previous = this.get('_ihandlers') || Object.create(null);
+        const next = Object.assign(Object.create(null), this._moduleHandlers);
+        for (const name of Object.keys(handlers)) {
+            if (name === 'src') continue;
+            const body = handlers[name];
+            if (typeof body !== 'string') throw new TypeError('JavaScript handlers must be strings');
+            // Exact source comparison avoids 32-bit hash collisions and removes
+            // deleted handlers instead of accumulating stale executable closures.
+            next[name] = previous[name] && previous[name][0] === body
+                ? previous[name] : [body, this._defineHandler(name, body)];
         }
+        this.set('_ihandlers', next, {silent: true});
+        return next;
     }
-    _apiMod:string|null = null;
-    static _needsAPILoad(curMod:string|null, handlers:Record<string, any>, _ihandlers:Record<string, any> ):boolean {
-        return (
-            handlers.hasOwnProperty("src") &&
-            curMod !== handlers["src"] &&
-            (!_ihandlers.hasOwnProperty("src")||_ihandlers["src"]!=handlers["src"])
-            )
+    _apiMod: string | null;
+    _apiLoader: Promise<Record<string, any>> | null;
+    static _importModule(specifier: string): Promise<Record<string, any>> {
+        // Keep native dynamic import through the CommonJS build, quoting the
+        // specifier as data. Authorization of imports is a separate policy.
+        return eval('import(' + JSON.stringify(specifier) + ')');
     }
-    _apiLoader:Promise<Record<string, any>>|null = null;
     _updateHandlers(): Promise<Record<string, any>> {
-        let handlers = this.get('jsHandlers') as Record<string, string>;
-        let debug = this.get('_debugPrint');
-        let _ihandlers = this.get('_ihandlers') as Record<string, any>;
-        let imp = null;
-        if (ActiveHTMLModel._needsAPILoad(this._apiMod, handlers, _ihandlers)) {
-            if (debug) {
-                console.log('loading API from source', handlers["src"]);
+        const handlers = {...this.get('jsHandlers')} as Record<string, string>;
+        const version = ++this._handlerVersion;
+        const source = handlers.src || null;
+        let imported: Promise<Record<string, any>>;
+        if (source && source !== this._apiMod) {
+            if (!this._moduleLoads.has(source)) {
+                const pending = ActiveHTMLModel._importModule(source);
+                this._moduleLoads.set(source, pending);
+                pending.catch(() => { if (this._moduleLoads.get(source) === pending) this._moduleLoads.delete(source); });
             }
-            // Ugly TypeScript hack to keep the dynamic import semantics we need
-            // for reliable loading
-            imp = eval("import(\"" + handlers["src"] + "\")");
-        }
-        if (imp !== null) {
-            this._apiLoader = imp.then(
-                (mod: Record<string, any>) => {
-                    for (let m in mod) {
-                        if (mod[m] instanceof Function) {
-                            _ihandlers[m] = [null, mod[m]];
-                        }
-                    }
-                    this._apiMod = handlers["src"];
-                    _ihandlers["src"] = handlers["src"];
-                }
-            ).then(() => {
-                this._setHandlers(handlers);
-                this._apiLoader = null;
-                return _ihandlers
-            })
-        }
-        if (this._apiLoader !== null && typeof this._apiLoader !== "undefined") {
-            return this._apiLoader as Promise<Record<string, any>>;
+            imported = this._moduleLoads.get(source)!;
         } else {
-            this._setHandlers(handlers)
-            return Promise.resolve(_ihandlers)
+            imported = Promise.resolve(null as any);
         }
+        const pending = imported.then(module => {
+            if (this._activeHTMLClosed || version !== this._handlerVersion) return this.get('_ihandlers');
+            if (source !== this._apiMod) {
+                this._moduleHandlers = Object.create(null);
+                if (module) for (const name of Object.keys(module)) {
+                    if (typeof module[name] === 'function') this._moduleHandlers[name] = [null, module[name]];
+                }
+                this._apiMod = source;
+            }
+            for (const name of this._moduleLoads.keys()) if (name !== source) this._moduleLoads.delete(name);
+            return this._setHandlers(handlers);
+        });
+        this._apiLoader = pending;
+        const clear = () => { if (this._apiLoader === pending) this._apiLoader = null; };
+        pending.then(clear, clear);
+        return pending;
     }
 
     _handle_comm_msg(msg: KernelMessage.ICommMsgMsg): Promise<void> {
@@ -255,10 +266,9 @@ export class ActiveHTMLModel extends DOMWidgetModel {
             this.trigger(data.content['handle'], data.content, msg.buffers);
             return Promise.resolve();
         } else if (method === "call") {
-            this.callHandler(data.content['handle'],
+            return this.callHandler(data.content['handle'],
                 this.dummyEvent(data.content['handle'], {content:data.content, buffers:msg.buffers})
-            );
-            return Promise.resolve();
+            ).then(() => undefined);
         } else {
             return super._handle_comm_msg(msg);
         }
@@ -275,36 +285,25 @@ export class ActiveHTMLModel extends DOMWidgetModel {
     callHandler(method:string, event:Event): Promise<any> {
         return ActiveHTMLModel.callModelHandler(method, event, this, this);
     }
-    static callModelHandler(method: string, event: Event, model:WidgetModel, target:any): Promise<any> {
-        let handlers = model.get('_ihandlers') as Record<string, any>;
-        let fn: ((event:Event, widget:WidgetModel, context:object) => any)|null = null;
-
-        if (handlers.hasOwnProperty(method)) {
-            fn = handlers[method][1];
-            if (fn !== null) {
-                let val = fn.call(target, event, target, ActiveHTMLView.handlerContext);
-                return Promise.resolve(val);
-            } else {
-                throw new Error("handler " + method + " is null");
+    static callModelHandler(method: string, event: Event, model: WidgetModel, target: any): Promise<any> {
+        const teardown = event.type === 'remove';
+        const dispatch = (source: ActiveHTMLModel, allowAPI: boolean): Promise<any> => {
+            if (!teardown && (source._activeHTMLClosed || !source._is_ready || source._apiLoader)) {
+                return source.ready().then(() => dispatch(source, allowAPI));
             }
-        } else {
-            let api = model.get('jsAPI') as ActiveHTMLModel|null;
-            if (api !== null) {
-                return api.ready().then((api) => {
-                    handlers = api.get('_ihandlers') as Record<string, any>
-                    if (handlers.hasOwnProperty(method)) {
-                        fn = handlers[method][1];
-                    }
-                    if (fn !== null) {
-                        return fn.call(target, event, target, ActiveHTMLView.handlerContext);
-                    }  else {
-                        throw new Error("couldn't find API method " + method);
-                    }
-                })
-            } else {
-                throw new Error("couldn't find handler or API method " + method);
+            const handlers = source.get('_ihandlers') || Object.create(null);
+            if (Object.prototype.hasOwnProperty.call(handlers, method)) {
+                try {
+                    // Ready browser handlers run in the DOM event stack, so
+                    // preventDefault/stopPropagation remain synchronous.
+                    return Promise.resolve(handlers[method][1].call(target, event, target, ActiveHTMLView.handlerContext));
+                } catch (error) { return Promise.reject(error); }
             }
-        }
+            const api = allowAPI && source.get('jsAPI') as ActiveHTMLModel | null;
+            if (api) return dispatch(api, false);
+            return Promise.reject(new Error("couldn't find handler or API method " + method));
+        };
+        return dispatch(model as ActiveHTMLModel, true);
     }
 }
 
@@ -337,7 +336,31 @@ export class ActiveHTMLView extends DOMWidgetView {
         this._currentClasses = new Set();
         this._currentStyles = new Set();
         this._initted = false;
+        this._removalPromise = Promise.resolve();
+        this._activeHTMLRemoved = false;
+        this._attributeBindings = new Map();
+        this._attributeVersions = new Map();
+        this._managedAttributes = new Set();
+        this._pendingEvents = new Map();
+        this._eventTimer = null;
+        this._bodyVersion = 0;
+        this._bodyUpdate = Promise.resolve();
+        this._pendingAttributeViews = new Map();
+        this.listenTo(this.model, 'change:onevents', this.updateOnHandlers);
+        this.listenTo(this.model, 'change:id', () => this.updateAttribute('id'));
+        this.listenTo(this.model, 'change:trackInput', () => this.delegateEvents());
     }
+
+    _activeHTMLRemoved: boolean;
+    _attributeBindings: Map<string, {source: any; view: WidgetView; setter: () => Promise<any>; owned: boolean}>;
+    _attributeVersions: Map<string, number>;
+    _managedAttributes: Set<string>;
+    _pendingEvents: Map<string, Record<string, any>>;
+    _eventTimer: ReturnType<typeof setTimeout> | null;
+    _removalPromise: Promise<any>;
+    _bodyVersion: number;
+    _bodyUpdate: Promise<any>;
+    _pendingAttributeViews: Map<string, {source: any; promise: Promise<any>}>;
 
     // Manage CSS styles
     _currentStyles: Set<string>;
@@ -347,7 +370,7 @@ export class ActiveHTMLView extends DOMWidgetView {
         return ActiveHTMLView._each(
             current,
             (prop) => {
-                if (!newStyles.hasOwnProperty(prop)) {
+                if (!newStyles.hasOwnProperty(prop) && !this._unsynced().includes(prop)) {
                     this.el.style.removeProperty(prop);
                     this._currentStyles.delete(prop);
                 }
@@ -358,12 +381,9 @@ export class ActiveHTMLView extends DOMWidgetView {
     setStyle(style: WidgetModel, oldStyle?: WidgetModel) {} // null override
     setStyles(): Promise<any> {
         let elementStyles = this.model.get("styleDict") as Record<string, string>;
-        let unsyncedProperties = this.model.get("unsyncedProperties");
         let keys = Object.keys(elementStyles);
         if (keys.length === 0) {
-            this._currentStyles.clear();
-            this.el.removeAttribute('style');
-            return ActiveHTMLView._defaultPromise();
+            return this.removeStyles();
         } else {
             if (this.model.get("_debugPrint")) {
                 console.log(this.el, "Element Styles:", elementStyles);
@@ -371,7 +391,7 @@ export class ActiveHTMLView extends DOMWidgetView {
             return ActiveHTMLView._each(
                 keys,
                 (prop:string) => {
-                    if (elementStyles.hasOwnProperty(prop) && !unsyncedProperties.includes(prop)) {
+                    if (elementStyles.hasOwnProperty(prop) && !this._unsynced().includes(prop)) {
                         // console.log(">>>", prop, elementStyles[prop], typeof prop);
                         this.el.style.setProperty(prop, elementStyles[prop]);
                         // console.log("<<<", prop, this.el.style.getPropertyValue(prop));
@@ -418,7 +438,7 @@ export class ActiveHTMLView extends DOMWidgetView {
     }
     updateClassList():Promise<any> {
         return this.setClasses().then(
-            ()=>this.removeClasses
+            ()=>this.removeClasses()
         )
     }
 
@@ -439,9 +459,10 @@ export class ActiveHTMLView extends DOMWidgetView {
         if (this.children_views !== null) {
             return this.children_views.update(this.model.get('children')).then((views: DOMWidgetView[]) => {
                 // Notify all children that their sizes may have changed.
-                views.forEach((view) => {
-                    MessageLoop.postMessage(view.pWidget, Widget.ResizeMessage.UnknownSize);
+                if (!this._activeHTMLRemoved) views.forEach(view => {
+                    if (!view.pWidget.isDisposed) MessageLoop.postMessage(view.pWidget, Widget.ResizeMessage.UnknownSize);
                 });
+                return views;
             });
         } else {
             return ActiveHTMLView._defaultPromise();
@@ -455,53 +476,61 @@ export class ActiveHTMLView extends DOMWidgetView {
         this.pWidget.addWidget(dummy);
 
         return this.create_child_view(model).then((view: DOMWidgetView) => {
-            // replace the dummy widget with the new one.
-            //@ts-ignore
-            let i = ArrayExt.firstIndexOf(this.pWidget.widgets, dummy);
-            //@ts-ignore
-            this.pWidget.insertWidget(i, view.pWidget);
+            // A child may finish loading after its parent has been removed.
+            const i = this._activeHTMLRemoved || this.pWidget.isDisposed ? -1
+                : ArrayExt.firstIndexOf((this.pWidget as any).widgets, dummy);
+            if (this._activeHTMLRemoved || dummy.isDisposed || i < 0) {
+                view.remove();
+            } else {
+                (this.pWidget as any).insertWidget(i, view.pWidget);
+            }
             dummy.dispose();
             return view;
-        }).catch(reject('Could not add child view to HTMLElement', true));
+        }).catch(error => { dummy.dispose(); throw error; });
     }
     children_views: ViewList<DOMWidgetView> | null;
     remove(): void {
+        if (this._activeHTMLRemoved) return;
+        this._activeHTMLRemoved = true;
+        this._bodyVersion++;
+        if (this._eventTimer !== null) clearTimeout(this._eventTimer);
+        this._eventTimer = null;
+        this._pendingEvents.clear();
+        for (const [name, record] of Object.entries(this._currentEvents)) this.el.removeEventListener(name, record[1]);
+        for (const [name, record] of Object.entries(this._currentOnHandlers)) this.model.off(name, record[1], this);
+        this._currentEvents = {};
+        this._currentOnHandlers = {};
+        for (const name of Array.from(this._attributeVersions.keys())) this._releaseAttribute(name);
+        this._pendingAttributeViews.clear();
+        this._attributeVersions.clear();
+        this.stopListening();
+        const children = this.children_views;
         this.children_views = null;
-        let onevents = this.model.get('onevents') as Record<string, object>;
-        if (onevents.hasOwnProperty('remove')) {
-            let oninit = onevents['remove'];
-            // if (Object.keys(oninit).length > 0) {
-            this.handleEvent(this.dummyEvent('remove'), 'remove', oninit);
-            // }
-        }
-        super.remove();
+        if (children) children.remove().catch(error => this.model.trigger('view:error', error));
+        try {
+            const handlers = this.model.get('onevents') || {};
+            if (Object.prototype.hasOwnProperty.call(handlers, 'remove')) {
+                this._removalPromise = this.handleEvent(this.dummyEvent('remove'), 'remove', handlers.remove);
+            }
+        } finally { super.remove(); }
     }
 
     updateBody(): Promise<any> {
-        let children = this.model.get('children');
-        let debug = this.model.get("_debugPrint");
-        if (children.length > 0) {
-            if (debug) { console.log(this.el, "Updating Children..."); }
-            return this.update_children();
-        } else {
-            let html = this.model.get("innerHTML");
-            if (html.length > 0) {
-                if (debug) { console.log(this.el, "Updating HTML..."); }
-                this.updateInnerHTML();
-                    return ActiveHTMLView._defaultPromise();
+        const version = ++this._bodyVersion;
+        const pending = this._bodyUpdate.catch(() => undefined).then(async () => {
+            if (this._activeHTMLRemoved || !this.children_views || version !== this._bodyVersion) return;
+            if (this.model.get('children').length) {
+                await this.update_children();
             } else {
-                let text = this.model.get("textContent");
-                if (text.length > 0) {
-                    if (debug) { console.log(this.el, "Updating Text..."); }
-                    this.updateTextContent();
-                    return ActiveHTMLView._defaultPromise();
-                } else {
-                    if (debug) { console.log(this.el, "Updating HTML..."); }
-                    this.updateInnerHTML();
-                    return ActiveHTMLView._defaultPromise();
-                }
+                await this.children_views.remove();
+                if (this._activeHTMLRemoved || version !== this._bodyVersion) return;
+                if (this.model.get('innerHTML').length) this.updateInnerHTML();
+                else if (this.model.get('textContent').length) this.updateTextContent();
+                else this.updateInnerHTML();
             }
-        }
+        });
+        this._bodyUpdate = pending;
+        return pending;
     }
     updateInnerHTML(): void {
         // let bodyType = this.model.get('_bodyType');
@@ -566,81 +595,69 @@ export class ActiveHTMLView extends DOMWidgetView {
           }
         )
     }
-    _modelHTMLSetter(prop:string, val:WidgetView) {
-        let parent = this;
-        function setHTML():Promise<any> {
-            let ud = val.update() as undefined|Promise<any>;
-            if (ud !== undefined) {
-                return ud.then(
-                    () => {
-                        let newHTML = val.el.outerHTML;
-                        let oldHTML = parent.el.getAttribute(prop);
-                        if (newHTML != oldHTML) {
-                            parent.el.setAttribute(prop, newHTML);
-                            return parent.notifyAttrUpdate(prop);
-                        } else {
-                            return ActiveHTMLView._defaultPromise();
-                        }
-                    }
-                )
-            } else {
-                let newHTML = val.el.outerHTML;
-                let oldHTML = parent.el.getAttribute(prop);
-                if (newHTML != oldHTML) {
-                    parent.el.setAttribute(prop, newHTML);
-                    return parent.notifyAttrUpdate(prop);
-                } else {
-                    return ActiveHTMLView._defaultPromise();
-                }
+    _modelHTMLSetter(prop: string, view: WidgetView) {
+        return async () => {
+            if (this._activeHTMLRemoved || this._attributeBindings.get(prop)?.view !== view) return;
+            await view.update();
+            if (this._activeHTMLRemoved || this._attributeBindings.get(prop)?.view !== view) return;
+            const html = view.el.outerHTML;
+            if (html !== this.el.getAttribute(prop)) {
+                this.el.setAttribute(prop, html);
+                await this.notifyAttrUpdate(prop);
             }
-        }
-        return setHTML;
+        };
     }
-    _attachWidgetAsAttr(prop:string, val:WidgetView):Promise<any> {
-        let setter = this._modelHTMLSetter(prop, val);
-        val.model.on("change", setter, val);
-        let r = val.render();
-        if (r !== undefined) {
-            return r.then(() => {
-                if (val.hasOwnProperty('renderChildren')) {
-                    //@ts-ignore
-                    return val.renderChildren().then(setter)
-                } else {
-                    return setter();
-                }
-            })
-        } else if (val.hasOwnProperty('renderChildren')) {
-            //@ts-ignore
-            return val.renderChildren().then(setter)
-        } else {
-            return setter();
+    _releaseAttribute(prop: string): number {
+        const version = (this._attributeVersions.get(prop) || 0) + 1;
+        this._attributeVersions.set(prop, version);
+        this._pendingAttributeViews.delete(prop);
+        const record = this._attributeBindings.get(prop);
+        if (record) {
+            this.stopListening(record.view.model, 'change', record.setter);
+            if (record.owned) record.view.remove();
+            this._attributeBindings.delete(prop);
         }
+        return version;
     }
-    _updateAttribute(prop:string, attrs:Record<string, any>):Promise<any> {
-        let val = attrs[prop] as string|object;
-        if (val === "") {
-            if (this.el.hasAttribute(prop)) {
-                this.el.removeAttribute(prop);
-                return this.notifyAttrUpdate(prop);
-            }
-        }  else if (typeof val === 'string') {
-            let cur = this.el.getAttribute(prop);
-            if (cur !== val) {
-                this.el.setAttribute(prop, val);
-                return this.notifyAttrUpdate(prop);
-            }
+    _attachWidgetAsAttr(prop: string, view: WidgetView, source: any = view, owned = false, version?: number): Promise<any> {
+        if (this._activeHTMLRemoved || (version !== undefined && version !== this._attributeVersions.get(prop))) {
+            if (owned) view.remove();
+            return Promise.resolve();
+        }
+        const setter = this._modelHTMLSetter(prop, view);
+        this._attributeBindings.set(prop, {source, view, setter, owned});
+        this.listenTo(view.model, 'change', setter);
+        return setter();
+    }
+    _updateAttribute(prop: string, attrs: Record<string, any>): Promise<any> {
+        if (this._activeHTMLRemoved) return Promise.resolve();
+        const val = attrs[prop];
+        const loading = this._pendingAttributeViews.get(prop);
+        if (loading && loading.source === val) return loading.promise;
+        const previous = this._attributeBindings.get(prop);
+        if (previous && previous.source === val) return previous.setter();
+        const version = this._releaseAttribute(prop);
+        if (val == null || val === '' || val === false) {
+            if (this.el.hasAttribute(prop)) { this.el.removeAttribute(prop); return this.notifyAttrUpdate(prop); }
         } else if (val instanceof WidgetView) {
-            return this._attachWidgetAsAttr(prop, val);
+            return this._attachWidgetAsAttr(prop, val, val, false, version);
         } else if (val instanceof WidgetModel) {
-            return this.create_child_view(val).then((view: DOMWidgetView) => {
-                return this._attachWidgetAsAttr(prop, view);
-            }).catch(reject('Could not add child view to HTMLElement', true));
+            const promise = this.create_child_view(val).then(view => this._attachWidgetAsAttr(prop, view, val, true, version));
+            const record = {source: val, promise};
+            this._pendingAttributeViews.set(prop, record);
+            const clear = () => { if (this._pendingAttributeViews.get(prop) === record) this._pendingAttributeViews.delete(prop); };
+            promise.then(clear, clear);
+            return promise;
         } else {
-            this.el.setAttribute(prop, val.toString() + Object.keys(val).toString());
-            return this.notifyAttrUpdate(prop);
+            const text = val === true ? '' : typeof val === 'object' ? JSON.stringify(val) : String(val);
+            if (this.el.getAttribute(prop) !== text) { this.el.setAttribute(prop, text); return this.notifyAttrUpdate(prop); }
         }
-        return ActiveHTMLView._defaultPromise();
+        return Promise.resolve();
     }
+    _unsynced(): string[] {
+        return [...(this.model.get('unsyncedProperties') || []), ...(this.model.get('unsyncedProps') || [])];
+    }
+
 
     static async _each(arr: Iterable<any>, fn: (item: any) => any): Promise<any> {
         for (const item of arr) await fn(item)
@@ -648,19 +665,27 @@ export class ActiveHTMLView extends DOMWidgetView {
     static _defaultPromise(val = null) {
         return new Promise((resolve) => { resolve(val); });
     }
-    updateAttributes():Promise<any> {
-        let attrs = this.model.get('elementAttributes') as Record<string, any>;
-        let unsyncedProperties = this.model.get('unsyncedProperties');
-        let debug = this.model.get("_debugPrint");
-        if (debug) { console.log(this.el, "Element Properties:", attrs); }
-        return ActiveHTMLView._each(Object.keys(attrs),
-            (prop:string)=>(!unsyncedProperties.includes(prop) && this._updateAttribute(prop, attrs))
-        )
+    async updateAttributes(): Promise<any> {
+        if (this._activeHTMLRemoved) return;
+        const attrs = this.model.get('elementAttributes') as Record<string, any>;
+        const unsynced = this._unsynced();
+        for (const prop of Array.from(this._managedAttributes)) {
+            if (!Object.prototype.hasOwnProperty.call(attrs, prop) && !unsynced.includes(prop)) {
+                this._releaseAttribute(prop);
+                this.el.removeAttribute(prop);
+                this._managedAttributes.delete(prop);
+            }
+        }
+        for (const prop of Object.keys(attrs)) if (!unsynced.includes(prop)) {
+            this._managedAttributes.add(prop);
+            await this._updateAttribute(prop, attrs);
+        }
     }
+
     notifyAttrUpdate(prop:string):Promise<any> {
         let key = "view-change:"+prop;
         let onevents = this.model.get('onevents') as Record<string, object>;
-        if (onevents.hasOwnProperty('remove')) {
+        if (onevents.hasOwnProperty(key)) {
             if (this.model.get('_debugPrint')) {
                 console.log('notifying attr change:', key)
             }
@@ -840,11 +865,11 @@ export class ActiveHTMLView extends DOMWidgetView {
 
     _initted: boolean;
     _calloninit():void {
-        if (!this._initted) {
+        if (!this._initted && !this._activeHTMLRemoved) {
             let onevents = this.model.get('onevents') as Record<string, object>;
             if (onevents.hasOwnProperty('initialize')) {
                 let oninit = onevents['initialize'];
-                if (Object.keys(oninit).length > 0) {
+                if (oninit !== undefined) {
                     this.handleEvent(this.dummyEvent('initialize'), 'initialize', oninit);
                 }
             }
@@ -857,7 +882,7 @@ export class ActiveHTMLView extends DOMWidgetView {
             return r.then(
                 (v: WidgetView) => {
                     this.el.classList.remove('lm-Widget', 'p-Widget')
-                    return this.update().then(() => this._calloninit)
+                    return this.update().then(() => { this._calloninit(); return this; })
                 }
             )
         } else {
@@ -865,34 +890,26 @@ export class ActiveHTMLView extends DOMWidgetView {
              return this.update().then((v) => {this._calloninit(); return v});
         }
     }
-    renderChildren(): Promise<any> {
-        if (this.children_views !== null) {
-            return this.children_views.update([]).then(
-                (views) => ActiveHTMLView._each(
-                    views,
-                    (v: WidgetView) => {
-                        if (v.hasOwnProperty('renderChildren')) {
-                            //@ts-ignore
-                            return v.renderChildren();
-                        } else {
-                            v.render();
-                        }
-                    }
-                )
-            )
-        } else {
-            return ActiveHTMLView._defaultPromise();
+    async renderChildren(): Promise<any> {
+        if (this._activeHTMLRemoved || !this.children_views) return;
+        await this.updateBody();
+        const views = this.children_views ? await Promise.all(this.children_views.views) : [];
+        if (this._activeHTMLRemoved) return;
+        for (const view of views || []) {
+            if (typeof (view as any).renderChildren === 'function') await (view as any).renderChildren();
         }
     }
 
+
     update(): Promise<any> {
+        if (this._activeHTMLRemoved) return Promise.resolve(this);
         return this.updateAttribute('id').then(
             () => this.updateClassList().then(
-            () => this.setStyles().then(
+            () => this.updateStyles().then(
             () => this.updateBody().then(
             () => this.updateAttributes().then(
-            () => this.setEvents().then(
-            () => this.setOnHandlers().then(
+            () => this.updateEvents().then(
+            () => this.updateOnHandlers().then(
             () => this.updateValue().then(
             () => {return this;}
             ))))))))
@@ -938,45 +955,25 @@ export class ActiveHTMLView extends DOMWidgetView {
         }
     }
     handleChanged(e: Event) {
-        let target = e.target as HTMLInputElement;
-        let el = this.el;
-        let is_checkbox = el.getAttribute('type') === 'checkbox' || el.getAttribute('type') === 'radio';
-        let multiple = el.getAttribute('multiple');
-        if (is_checkbox) {
-            let checked = target.checked;
-            if (checked !== undefined) {
-                this.model.set('value', checked ? "true" : "false", {updated_view: this});
-                this.touch();
-            }
-        } else if (multiple) {
-            let el = this.el as HTMLSelectElement;
-            let opts = el.selectedOptions;
-            if (opts !== undefined) {
-                let val = [];
-                for(let i = 0; i < opts.length; i++) {
-                    let o = opts[i];
-                    val.push(o.value);
-                }
-                let newVal = val.join('&&');
-                this.model.set('value', newVal, {updated_view: this});
-                this.touch();
-            }
-        } else {
-            let val = target.value;
-            if (val !== undefined) {
-                this.model.set('value', val, {updated_view: this});
-                this.touch();
-            }
+        if (this._activeHTMLRemoved) return;
+        const target = e.target as HTMLInputElement;
+        const el = this.el as HTMLInputElement;
+        let value: string;
+        if (el.type === 'checkbox' || el.type === 'radio') value = target.checked ? 'true' : 'false';
+        else if (el.hasAttribute('multiple')) value = Array.from((this.el as HTMLSelectElement).selectedOptions).map(option => option.value).join('&&');
+        else value = target.value;
+        if (value !== undefined && value !== this.model.get('value')) {
+            this.model.set('value', value, {updated_view: this});
+            this.touch();
         }
     }
 
-    setData(key:string, value:any) {
-        let data = this.model.get('exportData') as Record<string, any>;
-        data[key] = value;
-        this.model.set('exportData', {}, {updated_view:this}); // force a state change
-        this.model.set('exportData', data, {updated_view:this});
-        this.touch()
+    setData(key: string, value: any) {
+        if (this._activeHTMLRemoved) return;
+        this.model.set('exportData', {...this.model.get('exportData'), [key]: value}, {updated_view: this});
+        this.touch();
     }
+
     getData(key:string, value:any) {
         let data = this.model.get('exportData') as Record<string, any>;
         return data[key];
@@ -1023,12 +1020,14 @@ export class ActiveHTMLView extends DOMWidgetView {
             }
         }
         // console.log("|", eventName, props);
+        let result: Promise<any> = Promise.resolve();
         if (method !== "") {
-            this.callHandler(method, e);
+            result = this.callHandler(method, e).catch(error => this.model.trigger('handler:error', error));
         }
         if (send) {
             this.sendEventMessage(e, this.constructEventMessage(e, props, eventName));
         }
+        return result;
     }
     callHandler(method:string, event:Event):Promise<any> {
         return ActiveHTMLModel.callModelHandler(method, event, this.model, this);
@@ -1054,41 +1053,62 @@ export class ActiveHTMLView extends DOMWidgetView {
             return listener({...msg, ...event});
         }
     }
-    constructEventMessage(e: Event, props?:string[], eventName?:string) {
-        if (props === undefined || props === null) {
-            props = this.model.get('defaultEventProperties');
-        }
-        if (props === undefined) {
-            props = ['target'];
-        }
-        let eventMessage:Record<string, any> = {};
-        if (eventName !== undefined) {
-            eventMessage['eventName'] = eventName;
-        }
-        for (let p of props) {
-            // @ts-ignore
-            let val = e[p];
-            if (p === "target") {
-                val = {};
-                let t = e.target as HTMLElement;
-                val['tag'] = t.tagName;
-                val['innerHTML'] = t.innerHTML;
-                for (let p of t.getAttributeNames()) {
-                    val[p] = t.getAttribute(p);
+    constructEventMessage(e: Event, props?: string[], eventName?: string) {
+        props = props || this.model.get('defaultEventProperties') || ['target'];
+        const message: Record<string, any> = {};
+        if (eventName !== undefined) message.eventName = eventName;
+        for (const prop of props!) {
+            if (prop === 'target') {
+                const target = e.target as HTMLElement;
+                if (!target || typeof target.getAttributeNames !== 'function') { message.target = null; continue; }
+                const data: Record<string, any> = {tag: target.tagName};
+                if (this.model.get('eventTargetMode') === 'legacy') {
+                    data.innerHTML = target.innerHTML;
+                    for (const name of target.getAttributeNames()) data[name] = target.getAttribute(name);
+                } else {
+                    for (const name of this.model.get('eventTargetFields') || []) {
+                        const value = name in target ? (target as any)[name] : target.getAttribute(name);
+                        if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) data[name] = value;
+                    }
+                }
+                message.target = data;
+            } else {
+                // Accept older field names without keeping their spelling as defaults.
+                const name = prop === 'timestamp' ? 'timeStamp' : prop === 'alKey' ? 'altKey' : prop;
+                const value = (e as any)[name];
+                if (value == null || ['string', 'number', 'boolean'].includes(typeof value)) message[prop] = value;
+                else if (Array.isArray(value) || Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null) {
+                    try {
+                        message[prop] = JSON.parse(JSON.stringify(value, (_key, item) => item instanceof Node ? undefined : item));
+                    } catch { /* Cyclic fields cannot cross the widget JSON protocol. */ }
                 }
             }
-            eventMessage[p] = val;
         }
-        return eventMessage;
+        return message;
     }
-    sendEventMessage(e: Event, message?:Record<string, any>) {
-        if (message === undefined) {
-            message = this.constructEventMessage(e);
-        }
-        let debug = this.model.get('_debugPrint');
-        if (debug) {
-            console.log(this.el, "Sending message:", message)
-        }
-        this.send(message);
+    _flushEvents(): void {
+        if (this._eventTimer !== null) clearTimeout(this._eventTimer);
+        this._eventTimer = null;
+        const pending = Array.from(this._pendingEvents.values());
+        this._pendingEvents.clear();
+        if (!this._activeHTMLRemoved) pending.forEach(message => this.send(message));
     }
+    sendEventMessage(e: Event, message?: Record<string, any>) {
+        if (e.type === 'remove') {
+            if (!(this.model as ActiveHTMLModel)._activeHTMLClosed) this.send(message || this.constructEventMessage(e));
+            return;
+        }
+        if (this._activeHTMLRemoved) return;
+        message = message || this.constructEventMessage(e);
+        const delay = this.model.get('eventThrottleMs') || 0;
+        const name = message.eventName || message.type || e.type;
+        if (delay > 0 && (this.model.get('coalescedEvents') || []).includes(name)) {
+            this._pendingEvents.set(name, message);
+            if (this._eventTimer === null) this._eventTimer = setTimeout(() => this._flushEvents(), delay);
+        } else {
+            this._flushEvents();
+            this.send(message);
+        }
+    }
+
 }

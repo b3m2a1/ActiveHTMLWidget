@@ -13,7 +13,7 @@ describe('Example', () => {
     it('should be createable', () => {
       const model = createTestModel(ActiveHTMLModel);
       expect(model).toBeInstanceOf(ActiveHTMLModel);
-      expect(model.get('value')).toEqual('Hello World');
+      expect(model.get('value')).toEqual('');
     });
 
     it('should be createable with a value', () => {

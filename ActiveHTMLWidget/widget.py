@@ -1,6 +1,6 @@
 
 from ipywidgets import Widget, DOMWidget, register, widget_serialization, CallbackDispatcher
-from traitlets import Unicode, Bool, Instance, Dict, List
+from traitlets import Unicode, Bool, Instance, Dict, List, Enum, Int
 from ipywidgets.widgets.trait_types import TypedTuple
 from ._frontend import module_name, module_version
 
@@ -20,7 +20,8 @@ class HTMLElement(DOMWidget):
     tagName = Unicode('div').tag(sync=True)
     classList = List().tag(sync=True)
     styleDict = Dict().tag(sync=True)
-    unsyncedProps = List().tag(sync=True)
+    unsyncedProps = List().tag(sync=True)  # legacy alias
+    unsyncedProperties = List().tag(sync=True)
     elementAttributes = Dict().tag(sync=True, **widget_serialization)
     innerHTML = Unicode('').tag(sync=True)
     textContent = Unicode('').tag(sync=True)
@@ -34,35 +35,54 @@ class HTMLElement(DOMWidget):
     jsHandlers = Dict().tag(sync=True)
     jsAPI = Instance(Widget, allow_none=True).tag(sync=True, **widget_serialization)
     onevents = Dict().tag(sync=True)
+    eventTargetMode = Enum(['compact', 'legacy'], default_value='compact').tag(sync=True)
+    eventTargetFields = List(Unicode(), default_value=['id', 'name', 'type', 'value', 'checked']).tag(sync=True)
+    eventThrottleMs = Int(0, min=0).tag(sync=True)
+    coalescedEvents = List(Unicode(), default_value=['pointermove', 'mousemove', 'input', 'wheel']).tag(sync=True)
     defaultEventProperties = List(default_value=[
         "bubbles", "cancelable", "composed",
-        "target", "timestamp", "type",
+        "target", "timeStamp", "type",
         "key", "repeat",
         "button", "buttons",
-        "alKey", "shiftKey", "ctrlKey", "metaKey"
+        "altKey", "shiftKey", "ctrlKey", "metaKey"
     ]).tag(sync=True)
     _debugPrint = Bool(False).tag(sync=True)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self._active_html_closed = False
         self._callbacks = CallbackDispatcher()
+        self._buffer_callbacks = CallbackDispatcher()
         self.on_msg(self._handle)
-    def _handle(self, _, msg, __):
-        self._callbacks(msg)
 
-    def bind_callback(self, callback, remove=False):
-        """Register a callback to execute when a DOM event occurs.
-        The callback will be called with one argument, an dict whose keys
-        depend on the type of event.
-        Parameters
-        ----------
-        remove: bool (optional)
-            Set to true to remove the callback from the list of callbacks.
-        """
-        self._callbacks.register_callback(callback, remove=remove)
+    def _handle(self, _, msg, buffers):
+        if not self._active_html_closed and isinstance(msg, dict):
+            self._callbacks(msg)
+            self._buffer_callbacks(msg, buffers)
+
+    def bind_callback(self, callback, remove=False, *, with_buffers=False):
+        """Register an event callback; opt into ``callback(message, buffers)``."""
+        if self._active_html_closed and not remove:
+            raise RuntimeError('Widget is closed')
+        dispatcher = self._buffer_callbacks if with_buffers else self._callbacks
+        dispatcher.register_callback(callback, remove=remove)
+
     def reset_callbacks(self):
-        """Remove any previously defined callback."""
         self._callbacks.callbacks.clear()
+        self._buffer_callbacks.callbacks.clear()
+
+    def close(self):
+        if getattr(self, '_active_html_closed', False):
+            return
+        self._active_html_closed = True
+        if hasattr(self, '_callbacks'):
+            self.reset_callbacks()
+            self.on_msg(self._handle, remove=True)
+        super().close()
+
+    def _require_open(self):
+        if self._active_html_closed or self.comm is None:
+            raise RuntimeError('Widget is closed')
 
     def __repr__(self):
         body = self.children if len(self.children) > 0 else self.innerHTML if len(self.innerHTML) > 0 else self.textContent
@@ -76,83 +96,66 @@ class HTMLElement(DOMWidget):
 
     _here = __file__
     @classmethod
-    def jupyterlab_install(self, exec_prefix=None, overwrite=False):
-        """
-        Attempts to do a basic installation for JupterLab
-        :return:
-        :rtype:
-        """
-        import sys, shutil, os, tempfile as tf
-
-        prefix = sys.exec_prefix if exec_prefix is None else exec_prefix
-        pkg_root = os.path.dirname(os.path.abspath(self._here))
-        pkg_name = os.path.basename(pkg_root)
-        src = os.path.join(pkg_root, 'labextension')
-        target = os.path.join(prefix, "share", "jupyter", "labextensions", pkg_name)
-        copied = False
-        if overwrite or not os.path.isdir(target):
-            copied = True
-            if os.path.exists(target):
-                with tf.TemporaryDirectory() as new_loc:
-                    try:
-                        os.remove(new_loc)
-                    except:
-                        pass
-                os.rename(target, new_loc)
-            else:
-                new_loc = None
+    def _install_extension(cls, kind, exec_prefix=None, overwrite=False):
+        """Stage the replacement before moving an existing extension out of place."""
+        import sys
+        import shutil
+        import tempfile
+        from pathlib import Path
+        if kind not in ('labextension', 'nbextension'):
+            raise ValueError('Unknown extension kind')
+        source = Path(cls._here).resolve().parent / kind
+        prefix = Path(sys.exec_prefix if exec_prefix is None else exec_prefix)
+        target = prefix / 'share/jupyter' / (kind + 's') / 'ActiveHTMLWidget'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() and not overwrite:
+            return False
+        temporary = Path(tempfile.mkdtemp(prefix='.activehtml-', dir=target.parent))
+        replacement = temporary / 'replacement'
+        backup = temporary / 'original'
+        retain_backup = False
+        try:
+            shutil.copytree(source, replacement)
+            if target.exists() and not overwrite:
+                return False
             try:
-                shutil.copytree(src, target)
-            except:
-                if new_loc is not None:
-                   os.rename(new_loc, target)
+                if target.exists():
+                    target.replace(backup)
+                replacement.replace(target)
+            except BaseException:
+                if backup.exists():
+                    try:
+                        backup.replace(target)
+                    except BaseException as restore_error:
+                        retain_backup = True
+                        raise RuntimeError('Original extension retained for recovery at ' + str(backup)) from restore_error
+                raise
+        finally:
+            if not retain_backup:
+                shutil.rmtree(temporary, ignore_errors=True)
+        return True
 
-        from IPython.core.display import HTML
-        if copied:
-            return HTML("<h4>Extension installed to {}. You will need to reload the page to get the widgets to display.</h1>".format(target))
     @classmethod
-    def jupyternb_install(self, exec_prefix=None, overwrite=False):
-        """
-        Attempts to do a basic installation for JupterLab
-        :return:
-        :rtype:
-        """
-        import sys, shutil, os, tempfile as tf
+    def jupyterlab_install(cls, exec_prefix=None, overwrite=False):
+        from IPython.display import HTML
+        if cls._install_extension('labextension', exec_prefix, overwrite):
+            return HTML('<h4>Extension installed. Reload the page to load the widget.</h4>')
 
-        prefix = sys.exec_prefix if exec_prefix is None else exec_prefix
-        pkg_root = os.path.dirname(os.path.abspath(self._here))
-        pkg_name = os.path.basename(pkg_root)
-        src = os.path.join(pkg_root, 'nbextension')
-        target = os.path.join(prefix, "share", "jupyter", "nbextensions", pkg_name)
-        copied = False
-        if overwrite or not os.path.isdir(target):
-            copied = True
-            if os.path.exists(target):
-                with tf.TemporaryDirectory() as new_loc:
-                    try:
-                        os.remove(new_loc)
-                    except:
-                        pass
-                os.rename(target, new_loc)
-            else:
-                new_loc = None
-            try:
-                shutil.copytree(src, target)
-            except:
-                if new_loc is not None:
-                   os.rename(new_loc, target)
-
-        from IPython.core.display import HTML
-        if copied:
-            return HTML("<h4>Extension installed to {}. You will need to reload the page to get the widgets to display.</h1>".format(target))
+    @classmethod
+    def jupyternb_install(cls, exec_prefix=None, overwrite=False):
+        from IPython.display import HTML
+        if cls._install_extension('nbextension', exec_prefix, overwrite):
+            return HTML('<h4>Extension installed. Reload the page to load the widget.</h4>')
 
     def trigger(self, event, content=None, buffers=None):
+        self._require_open()
         if content is None:
             content = {}
         content = content.copy()
         content['handle'] = event
         return self._send({"method": "trigger", "content": content}, buffers=buffers)
     def call(self, method, content=None, buffers=None):
+        self._require_open()
         if content is None:
             content = {}
         content = content.copy()

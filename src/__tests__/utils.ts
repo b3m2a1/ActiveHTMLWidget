@@ -5,6 +5,8 @@ import * as widgets from '@jupyter-widgets/base';
 import * as services from '@jupyterlab/services';
 
 let numComms = 0;
+let numModels = 0;
+const ManagerBase = (widgets as any).ManagerBase || require('@jupyter-widgets/base-manager').ManagerBase;
 
 export class MockComm implements widgets.IClassicComm {
   constructor() {
@@ -44,7 +46,7 @@ export class MockComm implements widgets.IClassicComm {
   _on_close: ((x?: any) => void) | null = null;
 }
 
-export class DummyManager extends widgets.ManagerBase<HTMLElement> {
+export class DummyManager extends ManagerBase {
   constructor() {
     super();
     this.el = window.document.createElement('div');
@@ -75,7 +77,7 @@ export class DummyManager extends widgets.ManagerBase<HTMLElement> {
       } else {
         return Promise.reject(`Cannot find class ${className}`);
       }
-    } else if (moduleName === 'jupyter-datawidgets') {
+    } else if (moduleName === 'ActiveHTMLWidget') {
       if (this.testClasses[className]) {
         return Promise.resolve(this.testClasses[className]);
       } else {
@@ -107,7 +109,7 @@ export function createTestModel<T extends widgets.WidgetModel>(
   constructor: Constructor<T>,
   attributes?: any
 ): T {
-  const id = widgets.uuid();
+  const id = 'activehtml-test-model-' + numModels++;
   const widget_manager = new DummyManager();
   const modelOptions = {
     widget_manager: widget_manager,
